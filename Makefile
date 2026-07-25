@@ -2,6 +2,8 @@
 
 .PHONY: release
 
+PUSH_RELEASE_TAG ?= 1
+
 release:
 	@echo "Usage: make release VERSION=x.y.z [or just 'make release' for date-based version]"
 
@@ -17,7 +19,9 @@ else
 	git pull
 	# Create and push the tag
 	git tag -f v$(VERSION)
+ifeq ($(PUSH_RELEASE_TAG),1)
 	git push -f origin v$(VERSION)
+endif
 	# Clean any previous builds
 	rm -rf build/ *.egg-info
 	# Build from the tagged state
@@ -26,4 +30,4 @@ else
 endif
 
 # Default target
-release: release-real 
+release: release-real
