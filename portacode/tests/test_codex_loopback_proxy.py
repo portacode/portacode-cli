@@ -13,6 +13,8 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
 
 from portacode.codex_loopback_proxy import (
+    MAX_REQUEST_BYTES,
+    MAX_TOTAL_TOOL_OUTPUT_BYTES,
     MAX_TOOL_OUTPUT_BYTES,
     CodexLoopbackProxy,
     sanitize_responses_request,
@@ -42,6 +44,40 @@ def test_sanitize_responses_request_crops_only_tool_results():
 def test_sanitize_responses_request_leaves_unknown_shapes_byte_identical():
     body = b'{"input":[{"type":"future_output","output":"abc"}]}'
     assert sanitize_responses_request(body) == (body, 0, 0)
+
+
+def test_sanitize_responses_request_enforces_aggregate_tool_output_budget():
+    huge = "x" * (MAX_TOOL_OUTPUT_BYTES * 2)
+    body = json.dumps({
+        "input": [
+            {"type": "function_call_output", "call_id": f"call-{index}", "output": huge}
+            for index in range(8)
+        ]
+    }).encode()
+
+    sanitized, changed, omitted = sanitize_responses_request(body)
+    payload = json.loads(sanitized)
+    retained = sum(len(item["output"].encode()) for item in payload["input"])
+
+    assert changed == 8
+    assert omitted > 0
+    assert retained <= MAX_TOTAL_TOOL_OUTPUT_BYTES
+    assert all(len(item["output"].encode()) <= MAX_TOOL_OUTPUT_BYTES for item in payload["input"])
+
+
+def test_ingress_limit_leaves_room_to_crop_oversized_tool_output():
+    assert MAX_REQUEST_BYTES > 10 * 1024 * 1024
+    huge = "x" * (10 * 1024 * 1024 + 1)
+    body = json.dumps({
+        "input": [{"type": "function_call_output", "call_id": "call-1", "output": huge}]
+    }).encode()
+
+    sanitized, changed, omitted = sanitize_responses_request(body)
+
+    assert len(body) < MAX_REQUEST_BYTES
+    assert len(sanitized) < len(body)
+    assert changed == 1
+    assert omitted > 10 * 1024 * 1024 - MAX_TOOL_OUTPUT_BYTES
 from portacode.keypair import KeyPair
 
 

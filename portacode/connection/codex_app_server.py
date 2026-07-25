@@ -14,9 +14,12 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_CODEX_COMMAND = ["codex", "app-server", "--listen", "stdio://"]
-# JSON-RPC is newline framed. Leave bounded headroom for one notification so
-# Portacode can crop it instead of asyncio's 64 KiB default killing the reader.
-CODEX_STDIO_MESSAGE_LIMIT = 4 * 1024 * 1024
+# JSON-RPC is newline framed and command completion notifications may contain
+# the aggregate output.  This ingress envelope must be larger than the UI
+# output limit so the handler can crop the notification instead of readline()
+# dropping it before dispatch.  It remains bounded to protect the agent from a
+# runaway app-server process.
+CODEX_STDIO_MESSAGE_LIMIT = 32 * 1024 * 1024
 
 
 class CodexAppServerError(RuntimeError):

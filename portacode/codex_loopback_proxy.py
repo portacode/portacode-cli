@@ -29,8 +29,14 @@ LOGGER = logging.getLogger(__name__)
 CODEX_LOOPBACK_HOST = "127.0.0.1"
 CODEX_LOOPBACK_PORT = 61789
 DEFAULT_GATEWAY_URL = "https://codexapi.portacode.com/v1"
-MAX_REQUEST_BYTES = 10 * 1024 * 1024
-MAX_TOOL_OUTPUT_BYTES = 256 * 1024
+# Codex has already serialized local command output by the time it reaches this
+# proxy.  The ingress envelope therefore needs to be larger than the payload we
+# are willing to send upstream, otherwise oversized tool output is rejected
+# before ``sanitize_responses_request`` gets a chance to crop it.
+MAX_REQUEST_BYTES = 32 * 1024 * 1024
+MAX_FORWARD_REQUEST_BYTES = 10 * 1024 * 1024
+MAX_TOOL_OUTPUT_BYTES = 64 * 1024
+MAX_TOTAL_TOOL_OUTPUT_BYTES = 256 * 1024
 ALLOWED_PATHS = {"/health", "/v1/models", "/v1/responses"}
 MAX_CONCURRENT_UPSTREAM = 8
 
@@ -54,6 +60,8 @@ def _truncate_utf8(value: str, limit: int = MAX_TOOL_OUTPUT_BYTES) -> tuple[str,
     raw = value.encode("utf-8")
     if len(raw) <= limit:
         return value, 0
+    if limit <= 0:
+        return "", len(raw)
     marker_budget = 160
     content_budget = max(limit - marker_budget, 0)
     head_size = content_budget * 3 // 4
@@ -65,6 +73,8 @@ def _truncate_utf8(value: str, limit: int = MAX_TOOL_OUTPUT_BYTES) -> tuple[str,
         f"\n\n[Portacode truncated {omitted} bytes of oversized tool output. "
         "Narrow the command or inspect a specific file.]\n\n"
     )
+    if len(marker.encode("utf-8")) >= limit:
+        return marker.encode("utf-8")[:limit].decode("utf-8", errors="ignore"), len(raw)
     result = f"{head}{marker}{tail}"
     # The dynamic marker can exceed marker_budget by a few bytes.
     while len(result.encode("utf-8")) > limit and head:
@@ -88,26 +98,33 @@ def sanitize_responses_request(body: bytes) -> tuple[bytes, int, int]:
 
     changed = 0
     omitted_total = 0
+    retained_total = 0
     for item in payload["input"]:
         if not isinstance(item, dict) or item.get("type") not in _TOOL_OUTPUT_TYPES:
             continue
         for key in ("output", "content"):
             value = item.get(key)
             if isinstance(value, str):
-                cropped, omitted = _truncate_utf8(value)
+                remaining = max(MAX_TOTAL_TOOL_OUTPUT_BYTES - retained_total, 0)
+                cropped, omitted = _truncate_utf8(value, min(MAX_TOOL_OUTPUT_BYTES, remaining))
                 if omitted:
                     item[key] = cropped
                     changed += 1
                     omitted_total += omitted
+                retained_total += len(cropped.encode("utf-8"))
             elif isinstance(value, list):
                 for part in value:
                     if not isinstance(part, dict) or not isinstance(part.get("text"), str):
                         continue
-                    cropped, omitted = _truncate_utf8(part["text"])
+                    remaining = max(MAX_TOTAL_TOOL_OUTPUT_BYTES - retained_total, 0)
+                    cropped, omitted = _truncate_utf8(
+                        part["text"], min(MAX_TOOL_OUTPUT_BYTES, remaining)
+                    )
                     if omitted:
                         part["text"] = cropped
                         changed += 1
                         omitted_total += omitted
+                    retained_total += len(cropped.encode("utf-8"))
     if not changed:
         return body, 0, 0
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), changed, omitted_total
@@ -450,6 +467,10 @@ class CodexLoopbackProxy:
                     req_id,
                     cropped_fields,
                     omitted_bytes,
+                )
+            if len(body) > MAX_FORWARD_REQUEST_BYTES:
+                raise ValueError(
+                    "Request body remains too large after local tool-output truncation"
                 )
         headers = self._signature_headers(method, path, body)
         content_type = request_headers.get("content-type")
