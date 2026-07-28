@@ -213,6 +213,16 @@ class ConnectionManager:
             else:
                 print("Press Ctrl+C to close the connection.")
         # Finished authentication flow.
+        try:
+            from portacode.github_credential import configure_git
+
+            await asyncio.to_thread(configure_git)
+        except Exception as exc:
+            logger.warning(
+                "Could not configure device-scoped GitHub credentials: %s",
+                LogCategory.CONNECTION,
+                exc,
+            )
         await self._register_initial_project_paths()
 
     async def _start_codex_loopback_proxy(self) -> None:

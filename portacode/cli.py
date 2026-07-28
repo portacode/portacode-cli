@@ -66,6 +66,18 @@ def prepare_codex_command() -> None:
     )
 
 
+@cli.command("github-setup")
+def github_setup_command() -> None:
+    """Configure Git to request device-scoped GitHub credentials from Portacode."""
+    from .github_credential import configure_git
+
+    try:
+        configure_git()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise click.ClickException(f"Could not configure GitHub access: {exc}") from exc
+    click.echo(click.style("GitHub access is configured for this device.", fg="green"))
+
+
 @cli.command()
 @click.option("--gateway", "gateway", "-g", help="Gateway websocket URL (overrides env/ default)")
 @click.option("--debug", "debug", is_flag=True, help="Enable debug logging")

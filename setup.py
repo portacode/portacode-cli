@@ -49,6 +49,7 @@ setup(
     entry_points={
         "console_scripts": [
             "portacode=portacode.cli:cli",
+            "git-credential-portacode=portacode.github_credential:main",
         ]
     },
     classifiers=[
