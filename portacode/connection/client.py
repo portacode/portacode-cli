@@ -216,7 +216,11 @@ class ConnectionManager:
         try:
             from portacode.github_credential import configure_git
 
-            await asyncio.to_thread(configure_git)
+            # Portacode supports Python 3.7, where asyncio.to_thread is not
+            # available. Keep the blocking Git configuration off the event
+            # loop using the compatible executor API.
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, configure_git)
         except Exception as exc:
             logger.warning(
                 "Could not configure device-scoped GitHub credentials: %s",

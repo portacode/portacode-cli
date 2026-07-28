@@ -22,4 +22,4 @@ except PackageNotFoundError:  # pragma: no cover
 # Keep explicit type annotation while remaining compatible with Python < 3.9
 # Thanks to the `annotations` future import above, the annotation is stored
 # as a string and only evaluated by type checkers / at runtime on 3.9+.
-__all__: list[str] = ["__version__"] 
+__all__: list[str] = ["__version__"]
