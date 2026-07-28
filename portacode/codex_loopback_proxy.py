@@ -36,7 +36,6 @@ DEFAULT_GATEWAY_URL = "https://codexapi.portacode.com/v1"
 MAX_REQUEST_BYTES = 32 * 1024 * 1024
 MAX_FORWARD_REQUEST_BYTES = 10 * 1024 * 1024
 MAX_TOOL_OUTPUT_BYTES = 64 * 1024
-MAX_TOTAL_TOOL_OUTPUT_BYTES = 256 * 1024
 ALLOWED_PATHS = {"/health", "/v1/models", "/v1/responses"}
 MAX_CONCURRENT_UPSTREAM = 8
 
@@ -98,33 +97,26 @@ def sanitize_responses_request(body: bytes) -> tuple[bytes, int, int]:
 
     changed = 0
     omitted_total = 0
-    retained_total = 0
     for item in payload["input"]:
         if not isinstance(item, dict) or item.get("type") not in _TOOL_OUTPUT_TYPES:
             continue
         for key in ("output", "content"):
             value = item.get(key)
             if isinstance(value, str):
-                remaining = max(MAX_TOTAL_TOOL_OUTPUT_BYTES - retained_total, 0)
-                cropped, omitted = _truncate_utf8(value, min(MAX_TOOL_OUTPUT_BYTES, remaining))
+                cropped, omitted = _truncate_utf8(value, MAX_TOOL_OUTPUT_BYTES)
                 if omitted:
                     item[key] = cropped
                     changed += 1
                     omitted_total += omitted
-                retained_total += len(cropped.encode("utf-8"))
             elif isinstance(value, list):
                 for part in value:
                     if not isinstance(part, dict) or not isinstance(part.get("text"), str):
                         continue
-                    remaining = max(MAX_TOTAL_TOOL_OUTPUT_BYTES - retained_total, 0)
-                    cropped, omitted = _truncate_utf8(
-                        part["text"], min(MAX_TOOL_OUTPUT_BYTES, remaining)
-                    )
+                    cropped, omitted = _truncate_utf8(part["text"], MAX_TOOL_OUTPUT_BYTES)
                     if omitted:
                         part["text"] = cropped
                         changed += 1
                         omitted_total += omitted
-                    retained_total += len(cropped.encode("utf-8"))
     if not changed:
         return body, 0, 0
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), changed, omitted_total
