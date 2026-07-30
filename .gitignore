@@ -10,7 +10,6 @@ client_sessions.json
 project_state_debug.json
 test_results
 logs
-AGENTS.md
 secrets
 
 # Example-generated volumes
