@@ -216,7 +216,11 @@ class CodexAppServer:
             "initialize",
             {
                 "clientInfo": self.client_info,
-                "capabilities": {"streaming": True},
+                # Paginated thread history (thread/turns/list) is currently
+                # gated behind this negotiated capability. Without it, a
+                # browser reload falls back to an excludeTurns read and only
+                # the manager's in-memory live items remain visible.
+                "capabilities": {"streaming": True, "experimentalApi": True},
             },
             timeout=60.0,
         )

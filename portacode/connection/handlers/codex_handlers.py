@@ -512,6 +512,11 @@ async def _resume_thread_history(
                 "threadId": thread_id,
                 "limit": 80,
                 "sortDirection": "asc",
+                # Summary view can intentionally omit user content, producing
+                # empty bubbles after a browser reload. Attachments are stored
+                # as lightweight path items, so full view does not embed the
+                # file bytes in this response.
+                "itemsView": "full",
             },
             timeout=120.0,
         )

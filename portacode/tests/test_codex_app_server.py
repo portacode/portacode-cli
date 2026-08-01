@@ -114,6 +114,12 @@ async def test_initialize_handshake():
 
     assert await bridge.healthy() is True
     assert any(b'"method":"initialize"' in chunk for chunk in proc.stdin.written)
+    initialize = next(
+        __import__("json").loads(chunk)
+        for chunk in proc.stdin.written
+        if b'"method":"initialize"' in chunk
+    )
+    assert initialize["params"]["capabilities"]["experimentalApi"] is True
     assert proc.spawn_kwargs["limit"] == CODEX_STDIO_MESSAGE_LIMIT
     await bridge.stop()
 

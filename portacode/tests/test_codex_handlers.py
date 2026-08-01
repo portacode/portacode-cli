@@ -170,6 +170,7 @@ async def test_codex_thread_resume():
     assert resume_call[1]["excludeTurns"] is True
     turns_call = next(c for c in manager.bridge.calls if c[0] == "thread/turns/list")
     assert turns_call[1]["threadId"] == "th-1"
+    assert turns_call[1]["itemsView"] == "full"
     assert not any(c[0] == "thread/read" for c in manager.bridge.calls)
 
 
