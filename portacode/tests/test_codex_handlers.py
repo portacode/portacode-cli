@@ -446,6 +446,98 @@ async def test_live_stream_is_materialized_and_replayed_to_new_tab():
 
 
 @pytest.mark.asyncio
+async def test_live_user_message_preserves_content_for_reconnect():
+    channel = DummyControlChannel()
+    manager = CodexChatManager(channel, _context())
+    manager.record_thread("th-1", "/tmp/proj", "p-1")
+    await manager._on_notification("turn/started", {"threadId": "th-1", "turnId": "turn-live"})
+    content = [
+        {"type": "input_text", "text": "describe this"},
+        {"type": "localImage", "path": "/tmp/photo.jpg"},
+    ]
+
+    await manager._on_notification(
+        "item/started",
+        {
+            "threadId": "th-1",
+            "item": {"id": "user-live", "type": "userMessage", "content": content},
+        },
+    )
+
+    assert manager.live_items("th-1") == [{
+        "id": "user-live",
+        "type": "userMessage",
+        "content": content,
+    }]
+
+
+@pytest.mark.asyncio
+async def test_completed_turn_snapshot_is_not_replayed_on_resume():
+    channel = DummyControlChannel()
+    context = _context()
+    manager = CodexChatManager(channel, context)
+    manager.record_thread("th-1", "/tmp/proj", "p-1")
+    await manager._on_notification("turn/started", {"threadId": "th-1", "turnId": "turn-1"})
+    await manager._on_notification(
+        "item/agentMessage/delta",
+        {"threadId": "th-1", "itemId": "assistant-live", "delta": "hello"},
+    )
+    await manager._on_notification(
+        "turn/completed",
+        {"threadId": "th-1", "turn": {"id": "turn-1", "status": "completed"}},
+    )
+    manager.bridge = FakeBridge()
+    context["codex_manager"] = manager
+
+    handler = CodexThreadResumeHandler(channel, context)
+    await handler.handle({
+        "cmd": "codex_thread_resume",
+        "project_id": "p-1",
+        "threadId": "th-1",
+        "cwd": "/tmp/proj",
+    })
+
+    payload = channel.sent[-1]
+    assert payload["liveItems"] == []
+    assert [item["id"] for item in payload["items"]] == ["msg-1"]
+
+
+@pytest.mark.asyncio
+async def test_active_turn_history_is_not_duplicated_with_live_snapshot():
+    channel = DummyControlChannel()
+    context = _context()
+    manager = CodexChatManager(channel, context)
+    manager.record_thread("th-1", "/tmp/proj", "p-1")
+    await manager._on_notification("turn/started", {"threadId": "th-1", "turnId": "turn-live"})
+    await manager._on_notification(
+        "item/agentMessage/delta",
+        {"threadId": "th-1", "itemId": "live-id", "delta": "same answer"},
+    )
+    bridge = FakeBridge()
+    bridge.responses["thread/turns/list"] = {
+        "data": [{
+            "id": "turn-live",
+            "status": "inProgress",
+            "items": [{"id": "history-id", "type": "agentMessage", "text": "same answer"}],
+        }]
+    }
+    manager.bridge = bridge
+    context["codex_manager"] = manager
+
+    handler = CodexThreadResumeHandler(channel, context)
+    await handler.handle({
+        "cmd": "codex_thread_resume",
+        "project_id": "p-1",
+        "threadId": "th-1",
+        "cwd": "/tmp/proj",
+    })
+
+    payload = channel.sent[-1]
+    assert payload["items"] == []
+    assert [item["id"] for item in payload["liveItems"]] == ["live-id"]
+
+
+@pytest.mark.asyncio
 async def test_command_output_is_bounded_before_forwarding_and_snapshotting():
     from portacode.connection.handlers.codex_handlers import MAX_UI_COMMAND_OUTPUT_BYTES
 

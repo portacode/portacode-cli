@@ -191,6 +191,10 @@ class CodexChatManager:
                 self._thread_live_items.pop(oldest, None)
         elif thread_id and method == "turn/completed":
             self._thread_active_turn.pop(str(thread_id), None)
+            # Durable history is authoritative once a turn completes. Keeping
+            # its reconnect snapshot would make resume return the same turn in
+            # both `items` and `liveItems`.
+            self._thread_live_items.pop(str(thread_id), None)
         if thread_id:
             params = self._materialize_and_bound_notification(str(thread_id), method, params)
         project_id = self._resolve_project_id(params)
@@ -249,6 +253,11 @@ class CodexChatManager:
         for key in ("role", "command", "status"):
             if raw.get(key) is not None:
                 item[key] = copy.deepcopy(raw[key])
+        # userMessage text and attachments live in `content`, not `text`.
+        # Preserve that structure so a reconnect cannot materialize an empty
+        # user bubble.
+        if isinstance(raw.get("content"), list):
+            item["content"] = copy.deepcopy(raw["content"])
 
         is_command = "commandExecution" in method or item.get("type") == "commandExecution"
         text_key = None
@@ -435,7 +444,14 @@ def _items_from_turns(turns: list) -> list:
             continue
         turn_items = turn.get("items")
         if isinstance(turn_items, list):
-            items.extend(turn_items)
+            turn_id = turn.get("id") or turn.get("turnId")
+            for raw_item in turn_items:
+                if not isinstance(raw_item, dict):
+                    continue
+                item = copy.deepcopy(raw_item)
+                if turn_id:
+                    item["_portacode_turn_id"] = str(turn_id)
+                items.append(item)
     return items
 
 
@@ -766,12 +782,26 @@ class CodexThreadResumeHandler(CodexAsyncHandler):
             if known_turn_id:
                 active_turn = {"id": known_turn_id, "status": "inProgress"}
 
+        live_items = manager.live_items(thread_id) if active_turn else []
+        # During an active reconnect the live snapshot is the authoritative
+        # representation of that turn. Do not also send its possibly partial
+        # durable-history representation to the browser.
+        if live_items:
+            active_turn_id = active_turn.get("id") or active_turn.get("turnId")
+            if active_turn_id:
+                items = [
+                    item for item in items
+                    if item.get("_portacode_turn_id") != str(active_turn_id)
+                ]
+        for item in items:
+            item.pop("_portacode_turn_id", None)
+
         payload = {
             "event": "codex_thread_resumed",
             "threadId": thread_id,
             "thread": thread,
             "items": items,
-            "liveItems": manager.live_items(thread_id),
+            "liveItems": live_items,
         }
         if active_turn:
             payload["activeTurn"] = active_turn
