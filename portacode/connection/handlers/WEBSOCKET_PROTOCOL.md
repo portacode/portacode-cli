@@ -62,6 +62,12 @@ This document describes the complete protocol for communicating with devices thr
     - [`file_rename`](#file_rename)
     - [`file_upload`](#file_upload)
     - [`file_download`](#file_download)
+    - [`transfer_prepare`](#transfer_prepare)
+    - [`transfer_read_chunk`](#transfer_read_chunk)
+    - [`transfer_receive_chunk`](#transfer_receive_chunk)
+    - [`transfer_status`](#transfer_status)
+    - [`transfer_finalize`](#transfer_finalize)
+    - [`transfer_cancel`](#transfer_cancel)
     - [`content_request`](#content_request)
   - [Project State Actions](#project-state-actions)
     - [`project_state_folder_expand`](#project_state_folder_expand)
@@ -813,6 +819,75 @@ Downloads a file from the device. The binary file is base64-encoded for transpor
 
 *   On success, the device will respond with one or more [`file_download_response`](#file_download_response) events.
 *   On error, a generic [`error`](#error) event is sent or `file_download_response.success` is `false`.
+
+### Resumable file and folder transfers
+
+The `transfer_*` commands provide a disk-backed, pull-based protocol for files
+and folders. Unlike `file_upload`/`file_download`, transfer state survives a
+WebSocket reconnect and a Portacode agent restart. Every command requires the
+same server-issued, high-entropy `authorization_token`; the device stores only
+its SHA-256 hash and binds it to one `transfer_id`, role, and path. Possession of
+a transfer ID alone grants no access.
+
+Folders are packaged once as an uncompressed PAX tar archive so subsequent
+chunk reads remain byte-for-byte stable. Source preparation and destination
+extraction reject symbolic/hard links, special device files, path traversal,
+and archives with more than the configured entry limit. Modes, timestamps, and
+numeric ownership are retained when the destination operating system and
+process privileges allow it. Links are deliberately rejected because chained
+archive links cannot be extracted safely by legacy Python runtimes.
+
+### `transfer_prepare`
+
+Creates or reopens a durable transfer. Common fields are `transfer_id` (UUID),
+`authorization_token` (at least 32 characters), `role` (`source` or
+`destination`), `kind` (`file` or `folder`), `path`, optional `chunk_size`, and
+optional `ttl_seconds`.
+
+Source preparation calculates the payload hash, chunk count, expanded size,
+entry count, metadata, and peak additional source storage. Folder preparation
+checks free space before producing its archive.
+
+Destination preparation additionally requires the source's `payload_size`,
+`payload_hash`, `chunk_count`, `expanded_size`, `expanded_storage_bytes`,
+`entry_count`, `metadata`, and `archive_format`. It refuses the operation when
+free space cannot accommodate the incoming payload, simultaneous extraction,
+destination filesystem entry overhead, and a safety reserve. `overwrite`
+defaults to false. Incoming bytes and extraction are staged on the destination
+filesystem, so the final atomic rename also works when the Portacode cache and
+destination are on different mounts. Payload and entry ceilings default to 10
+GiB and 100,000 entries and are configurable by the device operator.
+
+Returns `transfer_prepared` with sizes, storage estimates, and progress.
+
+### `transfer_read_chunk`
+
+Reads one stable source chunk by `transfer_id` and zero-based `chunk_index`.
+Returns `transfer_chunk_response` containing `content_base64`, `chunk_hash`,
+exact completed bytes, and `progress_percent`.
+
+### `transfer_receive_chunk`
+
+Writes one independently verified destination chunk at its durable offset.
+Duplicate chunks are idempotent. Returns `transfer_chunk_received` with exact
+completed bytes and percentage.
+
+### `transfer_status`
+
+Returns `transfer_status_response`, including state, completed chunks,
+`missing_chunks`, exact completed bytes, and percentage. A coordinator uses this
+after reconnect to request only missing chunks.
+
+### `transfer_finalize`
+
+Requires every chunk, verifies the complete SHA-256, safely extracts folders,
+applies metadata where possible, and atomically installs the result. Returns
+`transfer_finalized`; repeated finalization of a completed job is idempotent.
+
+### `transfer_cancel`
+
+Deletes the authorized transfer's partial data and manifest and returns
+`transfer_canceled`. Expired transfer caches are also removed opportunistically.
 
 ### `content_request`
 

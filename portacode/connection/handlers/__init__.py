@@ -30,6 +30,14 @@ from .file_handlers import (
     ContentRequestHandler,
 )
 from .diff_handlers import FileApplyDiffHandler, FilePreviewDiffHandler
+from .resumable_transfer_handlers import (
+    TransferPrepareHandler,
+    TransferReadChunkHandler,
+    TransferReceiveChunkHandler,
+    TransferStatusHandler,
+    TransferFinalizeHandler,
+    TransferCancelHandler,
+)
 from .project_state_handlers import (
     ProjectStateFolderExpandHandler,
     ProjectStateFolderCollapseHandler,
@@ -99,6 +107,12 @@ __all__ = [
     "ContentRequestHandler",
     "FileApplyDiffHandler",
     "FilePreviewDiffHandler",
+    "TransferPrepareHandler",
+    "TransferReadChunkHandler",
+    "TransferReceiveChunkHandler",
+    "TransferStatusHandler",
+    "TransferFinalizeHandler",
+    "TransferCancelHandler",
     # Project state handlers
     "ProjectStateFolderExpandHandler",
     "ProjectStateFolderCollapseHandler",

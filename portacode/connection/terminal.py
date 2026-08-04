@@ -83,6 +83,14 @@ from .handlers.project_aware_file_handlers import (
     ProjectAwareFolderCreateHandler,
 )
 from .handlers.file_transfer_handlers import FileUploadHandler, FileDownloadHandler
+from .handlers.resumable_transfer_handlers import (
+    TransferPrepareHandler,
+    TransferReadChunkHandler,
+    TransferReceiveChunkHandler,
+    TransferStatusHandler,
+    TransferFinalizeHandler,
+    TransferCancelHandler,
+)
 from .handlers.session import SessionManager
 from .webmin_proxy_config import apply_turnkey_webmin_proxy_config
 from portacode.tunneling.privileged import read_text, run, write_text
@@ -524,6 +532,12 @@ class TerminalManager:
         self._command_registry.register(FileMoveCopyHandler)
         self._command_registry.register(FileUploadHandler)
         self._command_registry.register(FileDownloadHandler)
+        self._command_registry.register(TransferPrepareHandler)
+        self._command_registry.register(TransferReadChunkHandler)
+        self._command_registry.register(TransferReceiveChunkHandler)
+        self._command_registry.register(TransferStatusHandler)
+        self._command_registry.register(TransferFinalizeHandler)
+        self._command_registry.register(TransferCancelHandler)
         self._command_registry.register(FileSearchHandler)
         self._command_registry.register(ContentRequestHandler)
         self._command_registry.register(FileApplyDiffHandler)
