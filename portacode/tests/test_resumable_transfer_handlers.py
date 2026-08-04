@@ -107,6 +107,8 @@ def test_folder_transfer_resumes_and_preserves_tree_metadata(tmp_path, monkeypat
     (source / "nested" / "photo.bin").write_bytes(b"image" * 30000)
     (source / "readme.txt").write_text("hello", encoding="utf-8")
     (source / "nested" / "photo.bin").chmod(0o600)
+    (source / "readme.txt").chmod(0o664)
+    (source / "nested").chmod(0o770)
     transfer_id = str(uuid.uuid4())
     monkeypatch.setenv("PORTACODE_TRANSFER_CACHE_DIR", str(source_cache))
     prepared = _handler(TransferPrepareHandler).execute({
@@ -124,6 +126,8 @@ def test_folder_transfer_resumes_and_preserves_tree_metadata(tmp_path, monkeypat
     assert (destination / "readme.txt").read_text(encoding="utf-8") == "hello"
     assert (destination / "nested" / "photo.bin").read_bytes() == b"image" * 30000
     assert stat.S_IMODE((destination / "nested" / "photo.bin").stat().st_mode) == 0o600
+    assert stat.S_IMODE((destination / "readme.txt").stat().st_mode) == 0o664
+    assert stat.S_IMODE((destination / "nested").stat().st_mode) == 0o770
     assert finalized["kind"] == "folder"
     assert finalized["metadata_preserved"]["mode"] is True
 

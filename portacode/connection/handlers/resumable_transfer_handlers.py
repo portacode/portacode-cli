@@ -477,7 +477,7 @@ def _apply_metadata(path: Path, metadata: Dict[str, Any]) -> Dict[str, bool]:
     except (OSError, NotImplementedError):
         # Some Unix builds expose follow_symlinks but do not implement it for
         # chmod. Staged file payloads are verified regular files.
-        if path.is_file() and not path.is_symlink():
+        if (path.is_file() or path.is_dir()) and not path.is_symlink():
             try:
                 os.chmod(path, int(metadata["mode"]))
                 result["mode"] = True
@@ -496,6 +496,34 @@ def _apply_metadata(path: Path, metadata: Dict[str, Any]) -> Dict[str, bool]:
     except (KeyError, OSError, NotImplementedError):
         pass
     return result
+
+
+def _restore_archive_metadata(root: Path, members: Iterable[tarfile.TarInfo]) -> Dict[str, bool]:
+    """Restore validated tar metadata consistently across Python versions.
+
+    Python 3.14's default tar extraction filter intentionally removes group
+    and other write bits. The archive has already passed our stricter path,
+    link, and special-file validation, so reapply its recorded metadata after
+    extraction. Directories are handled last so creating their children does
+    not overwrite their timestamps.
+    """
+    results = {"mode": True, "ownership": True, "timestamps": True}
+    ordered = sorted(members, key=lambda item: (item.isdir(), -len(PurePosixPath(item.name).parts)))
+    for member in ordered:
+        target = root / Path(*PurePosixPath(member.name).parts)
+        pax = member.pax_headers or {}
+        timestamp = float(pax.get("mtime", member.mtime))
+        metadata = {
+            "mode": member.mode,
+            "uid": member.uid,
+            "gid": member.gid,
+            "atime_ns": int(float(pax.get("atime", timestamp)) * 1_000_000_000),
+            "mtime_ns": int(timestamp * 1_000_000_000),
+        }
+        applied = _apply_metadata(target, metadata)
+        for key, value in applied.items():
+            results[key] = results[key] and value
+    return results
 
 
 def _install_path(staged: Path, destination: Path, overwrite: bool) -> None:
@@ -551,6 +579,7 @@ def _finalize(message: Dict[str, Any]) -> Dict[str, Any]:
             if len(members) != int(manifest.get("entry_count") or len(members)):
                 raise ValueError("Archive entry count differs from the authorized manifest")
             archive.extractall(extraction_root, members=members, numeric_owner=True)
+            metadata_result = _restore_archive_metadata(extraction_root, members)
         roots = list(extraction_root.iterdir())
         if len(roots) != 1:
             raise ValueError("Folder archive must contain exactly one root item")
