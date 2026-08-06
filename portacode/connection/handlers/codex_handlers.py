@@ -195,6 +195,9 @@ class CodexChatManager:
             # its reconnect snapshot would make resume return the same turn in
             # both `items` and `liveItems`.
             self._thread_live_items.pop(str(thread_id), None)
+        elif thread_id and method == "error" and not params.get("willRetry"):
+            self._thread_active_turn.pop(str(thread_id), None)
+            self._thread_live_items.pop(str(thread_id), None)
         if thread_id:
             params = self._materialize_and_bound_notification(str(thread_id), method, params)
         project_id = self._resolve_project_id(params)
@@ -599,6 +602,20 @@ class CodexAsyncHandler(AsyncHandler):
             await self.send_response(response, reply_channel, project_id)
         except Exception as exc:
             LOGGER.exception("handler: Error in codex handler %s: %s", self.command_name, exc)
+            source_client_session = message.get("source_client_session")
+            if source_client_session:
+                payload = {
+                    "event": "error",
+                    "message": str(exc),
+                    "client_sessions": [source_client_session],
+                }
+                project_id = _project_id(message)
+                if project_id:
+                    payload["project_id"] = project_id
+                if message.get("request_id"):
+                    payload["request_id"] = message["request_id"]
+                await self.control_channel.send(payload)
+                return
             await self.send_error(
                 str(exc),
                 reply_channel,
@@ -694,6 +711,20 @@ class CodexThreadListHandler(CodexAsyncHandler):
 
         result = await manager.bridge.call("thread/list", params)
         threads, next_cursor = _threads_from_list_result(result)
+        # app-server metadata is not consistently refreshed while a turn is
+        # running. The manager receives the authoritative lifecycle events.
+        for thread in threads:
+            if not isinstance(thread, dict) or not thread.get("id"):
+                continue
+            active_turn_id = manager._thread_active_turn.get(str(thread["id"]))
+            listed_status = str(thread.get("status") or "").lower().replace("_", "")
+            thread["isWorking"] = bool(active_turn_id) or listed_status in {
+                "inprogress", "active", "running", "working"
+            }
+            if active_turn_id:
+                thread["activeTurnId"] = active_turn_id
+            else:
+                thread.pop("activeTurnId", None)
         payload = {
             "event": "codex_thread_list",
             "threads": threads,
@@ -855,7 +886,21 @@ class CodexTurnStartHandler(CodexAsyncHandler):
         if message.get("summary"):
             params["summary"] = message["summary"]
 
-        result = await manager.bridge.call("turn/start", params)
+        try:
+            result = await manager.bridge.call("turn/start", params)
+        except CodexAppServerError as exc:
+            # A browser can survive a device/app-server restart while retaining
+            # its active thread ID. Fresh app-server processes must resume that
+            # durable rollout before turn/start recognizes it.
+            if "thread not found" not in str(exc).lower():
+                raise
+            await _resume_thread_history(
+                manager,
+                thread_id=str(thread_id),
+                cwd=cwd,
+                already_active=False,
+            )
+            result = await manager.bridge.call("turn/start", params)
         turn = _turn_from_result(result)
         turn_id = turn.get("id") or turn.get("turnId")
         if turn_id:

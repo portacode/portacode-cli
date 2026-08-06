@@ -27,6 +27,7 @@ from .base import SyncHandler
 from .proxmox_infra import get_infra_snapshot
 from .runtime_user import get_default_runtime_user, get_runtime_user_home
 from portacode.tunneling.forwarding_state import load_forwarding_state
+from portacode.connection.codex_app_server import CodexAppServer
 
 logger = logging.getLogger(__name__)
 
@@ -617,6 +618,14 @@ class SystemInfoHandler(SyncHandler):
         info["proxmox"] = _get_proxmox_info()
         info["cloudflare_tunnel"] = _get_cloudflare_tunnel_state()
         info["cloudflare_forwarding"] = _get_cloudflare_forwarding_state()
+        # Capability discovery belongs in the device snapshot. The dashboard
+        # receives system_info on connect and periodically, so it should not
+        # need a separate request merely to decide whether to show Codex UI.
+        codex_installed = bool(CodexAppServer.get_binary_path())
+        info["codex"] = {
+            "installed": codex_installed,
+            "app_server_supported": codex_installed,
+        }
         # logger.info("System info collected successfully with OS info: %s", info.get("os_info", {}).get("os_type", "Unknown"))
         
         info["portacode_version"] = __version__

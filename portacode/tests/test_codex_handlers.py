@@ -134,6 +134,31 @@ async def test_codex_thread_list():
 
 
 @pytest.mark.asyncio
+async def test_codex_thread_list_marks_all_manager_active_threads():
+    channel = DummyControlChannel()
+    context = _context()
+    manager = CodexChatManager(channel, context)
+    manager.bridge = FakeBridge()
+    manager.bridge.responses["thread/list"] = {
+        "data": [{"id": "th-idle"}, {"id": "th-live"}],
+        "nextCursor": None,
+    }
+    manager._thread_active_turn["th-live"] = "turn-live"
+    context["codex_manager"] = manager
+
+    handler = CodexThreadListHandler(channel, context)
+    await handler.handle(
+        {"cmd": "codex_thread_list", "project_id": "p-1", "cwd": "/tmp/proj"},
+        reply_channel="rc-1",
+    )
+
+    threads = {thread["id"]: thread for thread in channel.sent[0]["threads"]}
+    assert threads["th-idle"]["isWorking"] is False
+    assert threads["th-live"]["isWorking"] is True
+    assert threads["th-live"]["activeTurnId"] == "turn-live"
+
+
+@pytest.mark.asyncio
 async def test_codex_thread_start_records_mapping():
     channel = DummyControlChannel()
     context = _context()
@@ -189,6 +214,80 @@ async def test_codex_turn_start():
     assert payload["event"] == "codex_turn_started"
     assert payload["threadId"] == "th-1"
     assert manager.bridge.calls[-1] == ("turn/start", {"threadId": "th-1", "input": [{"type": "text", "text": "hi"}]})
+
+
+@pytest.mark.asyncio
+async def test_codex_turn_start_resumes_durable_thread_after_app_server_restart():
+    from portacode.connection.codex_app_server import CodexAppServerError
+
+    channel = DummyControlChannel()
+    context = _context()
+    manager = CodexChatManager(channel, context)
+    manager.bridge = FakeBridge()
+    context["codex_manager"] = manager
+    turn_attempts = 0
+
+    async def call(method: str, params: dict, timeout: float = 60.0):
+        nonlocal turn_attempts
+        manager.bridge.calls.append((method, params))
+        if method == "turn/start":
+            turn_attempts += 1
+            if turn_attempts == 1:
+                raise CodexAppServerError("thread not found: th-1")
+            return {"turn": {"id": "turn-retried", "threadId": "th-1"}}
+        if method == "thread/resume":
+            return {"thread": {"id": "th-1"}}
+        if method == "thread/turns/list":
+            return {"data": []}
+        return {}
+
+    manager.bridge.call = call  # type: ignore[method-assign]
+    handler = CodexTurnStartHandler(channel, context)
+    await handler.handle({
+        "cmd": "codex_turn_start",
+        "project_id": "p-1",
+        "threadId": "th-1",
+        "cwd": "/tmp/proj",
+        "text": "hi",
+        "source_client_session": "new-browser-session",
+    })
+
+    assert turn_attempts == 2
+    assert any(method == "thread/resume" for method, _params in manager.bridge.calls)
+    assert channel.sent[-1]["event"] == "codex_turn_started"
+    assert channel.sent[-1]["client_sessions"] == ["new-browser-session"]
+
+
+@pytest.mark.asyncio
+async def test_codex_handler_error_targets_originating_browser_session():
+    channel = DummyControlChannel()
+    context = _context()
+    manager = CodexChatManager(channel, context)
+    manager.bridge = FakeBridge()
+    context["codex_manager"] = manager
+
+    async def call(method: str, params: dict, timeout: float = 60.0):
+        raise RuntimeError("device-side failure")
+
+    manager.bridge.call = call  # type: ignore[method-assign]
+    handler = CodexTurnStartHandler(channel, context)
+    await handler.handle({
+        "cmd": "codex_turn_start",
+        "project_id": "p-1",
+        "threadId": "th-1",
+        "cwd": "/tmp/proj",
+        "text": "hi",
+        "request_id": "req-1",
+        "source_client_session": "new-browser-session",
+    })
+
+    assert channel.sent[-1] == {
+        "event": "error",
+        "message": "device-side failure",
+        "client_sessions": ["new-browser-session"],
+        "project_id": "p-1",
+        "request_id": "req-1",
+    }
 
 
 @pytest.mark.asyncio
