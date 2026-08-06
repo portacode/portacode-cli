@@ -24,6 +24,69 @@ class PlayStoreScreenshotLogic:
                 f"document.body.style.zoom='{percent}%'"
             )
 
+    CODEX_PROMPT_MARKER = "exactly three short bullets"
+
+    async def select_terra(self, page):
+        """Select the inexpensive model used by the screenshot fixture."""
+        model_trigger = page.locator("codex-chat .model-trigger").first
+        await model_trigger.click()
+        terra = page.locator("codex-chat .model-option").filter(
+            has_text="GPT 5.6 Terra"
+        ).first
+        await terra.wait_for(timeout=10000)
+        await terra.click()
+
+    async def close_codex_sidebar(self, page):
+        await page.locator("codex-chat").first.evaluate(
+            """chat => {
+                if (chat._layoutCompact && chat._showSidebar) {
+                    chat._showSidebar = false;
+                    chat.requestUpdate();
+                }
+            }"""
+        )
+        await page.wait_for_timeout(200)
+
+    async def hide_duplicate_codex_messages(self, page):
+        """Keep reconnect replay duplicates out of the marketing capture."""
+        for role in ("user", "assistant"):
+            messages = page.locator(f"codex-chat .message.{role}")
+            seen = set()
+            for index in range(await messages.count()):
+                message = messages.nth(index)
+                text = " ".join((await message.text_content() or "").split())
+                if text in seen:
+                    await message.evaluate("element => element.style.display = 'none'")
+                elif text:
+                    seen.add(text)
+
+    async def seed_codex_review(self, page):
+        """Create one small, deterministic Terra review for the fixture."""
+        await self.close_codex_sidebar(page)
+        await self.select_terra(page)
+
+        composer = page.locator('codex-chat textarea[placeholder="Ask Codex…"]').first
+        await composer.fill(
+            "Without using tools or modifying files, reply with exactly three "
+            "short bullets describing tests for the staged notification service: "
+            "high/urgent creates an alert; other priorities return none; channel "
+            "and subject formatting. Stay under 45 words."
+        )
+        await page.locator('codex-chat button[aria-label="Send"]').first.click()
+        await page.locator("codex-chat .message.user").last.wait_for(timeout=30000)
+        reply = page.locator("codex-chat .message.assistant").last
+        await reply.wait_for(timeout=90000)
+        for _ in range(45):
+            reply_text = (await reply.text_content() or "").strip()
+            streaming = await page.locator("codex-chat").first.evaluate(
+                "chat => chat._isStreaming"
+            )
+            if len(reply_text) > 20 and not streaming:
+                await self.hide_duplicate_codex_messages(page)
+                return
+            await page.wait_for_timeout(2000)
+        raise TimeoutError("Codex Terra response did not finish within 90 seconds")
+
     async def open_first_codex_thread(self, page):
         """Open the newest Codex thread, creating the fixture thread if needed."""
         thread = page.locator("codex-chat .thread").first
@@ -36,44 +99,36 @@ class PlayStoreScreenshotLogic:
             await thread.wait_for(timeout=5000)
             await thread.click(force=True)
             await page.wait_for_timeout(700)
-            setup_error = page.locator("codex-chat .message.assistant").filter(
-                has_text="ai_setup_required"
-            ).last
-            if await setup_error.count():
-                await page.locator("codex-chat .header-new").first.click()
-                composer = page.locator(
-                    'codex-chat textarea[placeholder="Ask Codex…"]'
-                ).first
-                await composer.fill(
-                    "Review the staged Pulseboard notification service and "
-                    "suggest the most important tests."
-                )
+            await self.close_codex_sidebar(page)
+
+            user_text = await page.locator(
+                "codex-chat .message.user"
+            ).all_text_contents()
+            assistant_text = await page.locator(
+                "codex-chat .message.assistant"
+            ).all_text_contents()
+            last_reply = assistant_text[-1].strip() if assistant_text else ""
+            invalid_reply = any(
+                word in last_reply.lower()
+                for word in ("error", "insufficient", "balance", "ai_setup_required")
+            )
+            if (
+                any(self.CODEX_PROMPT_MARKER in text for text in user_text)
+                and len(last_reply) > 20
+                and not invalid_reply
+            ):
+                await self.select_terra(page)
+                await self.hide_duplicate_codex_messages(page)
+                return
+
+            await page.locator("codex-chat .header-new").first.click()
+            await self.seed_codex_review(page)
             return
         except Exception:
             pass
 
-        close_chats = page.locator(
-            'codex-chat button[aria-label="Close sidebar"]'
-        ).first
-        if await close_chats.count() and await close_chats.is_visible():
-            await close_chats.click()
-
-        composer = page.locator('codex-chat textarea[placeholder="Ask Codex…"]').first
-        await composer.wait_for(timeout=5000)
-        await composer.fill(
-            "Review the staged notification changes in this Pulseboard API "
-            "and summarize what should be tested. Do not modify files."
-        )
-        await page.locator('codex-chat button[aria-label="Send"]').first.click()
-        await page.locator("codex-chat .message.user").last.wait_for(timeout=30000)
-        try:
-            await page.locator("codex-chat .message.assistant").last.wait_for(
-                timeout=60000
-            )
-        except Exception:
-            # The user prompt still provides an accurate, useful Codex UI
-            # capture if the live model response takes longer than the suite.
-            pass
+        await self.close_codex_sidebar(page)
+        await self.seed_codex_review(page)
 
     async def expand_demo_tree(self, page):
         """Expand the representative nested source tree."""
