@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
 
 from portacode.codex_loopback_proxy import (
+    MAX_FORWARD_REQUEST_BYTES,
     MAX_REQUEST_BYTES,
     MAX_TOOL_OUTPUT_BYTES,
     CodexLoopbackProxy,
@@ -82,6 +83,33 @@ def test_ingress_limit_leaves_room_to_crop_oversized_tool_output():
     assert len(sanitized) < len(body)
     assert changed == 1
     assert omitted > 10 * 1024 * 1024 - MAX_TOOL_OUTPUT_BYTES
+
+
+def test_sanitize_omits_oldest_inline_tool_images_to_fit_forward_limit():
+    image = "data:image/png;base64," + ("a" * (3 * 1024 * 1024))
+    body = json.dumps({
+        "input": [
+            {
+                "type": "custom_tool_call_output",
+                "call_id": f"call-{index}",
+                "output": [
+                    {"type": "input_text", "text": f"screenshot {index}"},
+                    {"type": "input_image", "image_url": image, "detail": "high"},
+                ],
+            }
+            for index in range(4)
+        ]
+    }).encode()
+
+    sanitized, changed, omitted = sanitize_responses_request(body)
+    payload = json.loads(sanitized)
+
+    assert len(sanitized) <= MAX_FORWARD_REQUEST_BYTES
+    assert changed == 1
+    assert omitted >= len(image)
+    assert payload["input"][0]["output"][1]["type"] == "input_text"
+    assert "omitted an older inline tool screenshot" in payload["input"][0]["output"][1]["text"]
+    assert payload["input"][-1]["output"][1]["image_url"] == image
 from portacode.keypair import KeyPair
 
 

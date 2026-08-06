@@ -36,7 +36,7 @@ DEFAULT_GATEWAY_URL = "https://codexapi.portacode.com/v1"
 MAX_REQUEST_BYTES = 32 * 1024 * 1024
 MAX_FORWARD_REQUEST_BYTES = 10 * 1024 * 1024
 MAX_TOOL_OUTPUT_BYTES = 64 * 1024
-ALLOWED_PATHS = {"/health", "/v1/models", "/v1/responses"}
+ALLOWED_PATHS = {"/health", "/v1/models", "/v1/responses", "/v1/responses/compact"}
 MAX_CONCURRENT_UPSTREAM = 8
 
 # Streaming read can idle between SSE chunks; connect/write stay bounded.
@@ -117,9 +117,51 @@ def sanitize_responses_request(body: bytes) -> tuple[bytes, int, int]:
                         part["text"] = cropped
                         changed += 1
                         omitted_total += omitted
-    if not changed:
-        return body, 0, 0
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), changed, omitted_total
+    encoded = (
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if changed
+        else body
+    )
+    if len(encoded) <= MAX_FORWARD_REQUEST_BYTES:
+        return encoded, changed, omitted_total
+
+    # Image-producing tools return screenshots as inline data URLs. A long
+    # session can therefore be under the model token limit while its JSON body
+    # is many megabytes too large to forward. Remove the oldest inline images
+    # first, retaining newer screenshots whenever that is sufficient. Text
+    # alongside each screenshot remains available to compaction/inference.
+    image_parts: list[dict] = []
+    for item in payload["input"]:
+        if not isinstance(item, dict) or item.get("type") not in _TOOL_OUTPUT_TYPES:
+            continue
+        value = item.get("output") or item.get("content")
+        if not isinstance(value, list):
+            continue
+        for part in value:
+            if (
+                isinstance(part, dict)
+                and part.get("type") in {"input_image", "image_url"}
+                and isinstance(part.get("image_url"), str)
+                and part["image_url"].startswith("data:image/")
+            ):
+                image_parts.append(part)
+
+    for part in image_parts:
+        if len(encoded) <= MAX_FORWARD_REQUEST_BYTES:
+            break
+        original_bytes = len(part["image_url"].encode("utf-8"))
+        part.clear()
+        part.update(
+            {
+                "type": "input_text",
+                "text": "[Portacode omitted an older inline tool screenshot to keep the request within the forwarding limit.]",
+            }
+        )
+        changed += 1
+        omitted_total += original_bytes
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+    return encoded, changed, omitted_total
 
 FORWARD_RESPONSE_HEADERS = frozenset(
     {
@@ -327,7 +369,7 @@ class CodexLoopbackProxy:
             if method == "GET" and path != "/v1/models":
                 await self._write_error(writer, 405, "Method not allowed")
                 return
-            if method == "POST" and path != "/v1/responses":
+            if method == "POST" and path not in {"/v1/responses", "/v1/responses/compact"}:
                 await self._write_error(writer, 405, "Method not allowed")
                 return
             await self._forward(writer, method, path, headers, body, req_id=req_id)
@@ -451,7 +493,7 @@ class CodexLoopbackProxy:
         *,
         req_id: str,
     ) -> None:
-        if method == "POST" and path == "/v1/responses" and body:
+        if method == "POST" and path in {"/v1/responses", "/v1/responses/compact"} and body:
             body, cropped_fields, omitted_bytes = sanitize_responses_request(body)
             if cropped_fields:
                 LOGGER.warning(
