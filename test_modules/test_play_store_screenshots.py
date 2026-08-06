@@ -25,15 +25,87 @@ class PlayStoreScreenshotLogic:
             )
 
     async def open_first_codex_thread(self, page):
-        """Open the first current Codex thread, including compact layouts."""
+        """Open the newest Codex thread, creating the fixture thread if needed."""
         thread = page.locator("codex-chat .thread").first
         open_chats = page.locator(
             'codex-chat button[aria-label="Open chats"]'
         ).first
         if await open_chats.count() and await open_chats.is_visible():
             await open_chats.click()
-        await thread.wait_for(timeout=5000)
-        await thread.click(force=True)
+        try:
+            await thread.wait_for(timeout=5000)
+            await thread.click(force=True)
+            await page.wait_for_timeout(700)
+            setup_error = page.locator("codex-chat .message.assistant").filter(
+                has_text="ai_setup_required"
+            ).last
+            if await setup_error.count():
+                await page.locator("codex-chat .header-new").first.click()
+                composer = page.locator(
+                    'codex-chat textarea[placeholder="Ask Codex…"]'
+                ).first
+                await composer.fill(
+                    "Review the staged Pulseboard notification service and "
+                    "suggest the most important tests."
+                )
+            return
+        except Exception:
+            pass
+
+        close_chats = page.locator(
+            'codex-chat button[aria-label="Close sidebar"]'
+        ).first
+        if await close_chats.count() and await close_chats.is_visible():
+            await close_chats.click()
+
+        composer = page.locator('codex-chat textarea[placeholder="Ask Codex…"]').first
+        await composer.wait_for(timeout=5000)
+        await composer.fill(
+            "Review the staged notification changes in this Pulseboard API "
+            "and summarize what should be tested. Do not modify files."
+        )
+        await page.locator('codex-chat button[aria-label="Send"]').first.click()
+        await page.locator("codex-chat .message.user").last.wait_for(timeout=30000)
+        try:
+            await page.locator("codex-chat .message.assistant").last.wait_for(
+                timeout=60000
+            )
+        except Exception:
+            # The user prompt still provides an accurate, useful Codex UI
+            # capture if the live model response takes longer than the suite.
+            pass
+
+    async def expand_demo_tree(self, page):
+        """Expand the representative nested source tree."""
+        for folder_name in ("src", "pulseboard", "services"):
+            folder = page.locator(".file-item.folder").filter(
+                has=page.locator(".file-name", has_text=folder_name)
+            ).first
+            try:
+                await folder.wait_for(timeout=5000)
+                if "expanded" not in (await folder.get_attribute("class") or ""):
+                    await folder.click()
+                    await page.wait_for_timeout(400)
+            except Exception:
+                break
+
+    async def prepare_demo_workspace(self, page):
+        """Expand the representative source tree and open its main module."""
+        await self.expand_demo_tree(page)
+        app_file = page.locator(".file-item.file").filter(
+            has=page.locator(".file-name", has_text="app.py")
+        ).first
+        try:
+            await app_file.wait_for(timeout=5000)
+            await app_file.click()
+            open_action = page.locator(".context-menu-item").filter(
+                has_text="Open"
+            ).first
+            if await open_action.count() and await open_action.is_visible():
+                await open_action.click()
+            await page.wait_for_timeout(700)
+        except Exception:
+            pass
 
     async def capture(self, test_instance, post_editor_steps=None) -> TestResult:
         page = test_instance.playwright_manager.page
@@ -117,6 +189,7 @@ class PlayStoreScreenshotLogic:
                 "ACE editor shadow DOM not detected, proceeding with screenshot"
             )
 
+        await self.prepare_demo_workspace(page)
         await page.wait_for_timeout(1000)
         await test_instance.playwright_manager.take_screenshot(
             f"{self.device_name}_editor"
@@ -172,6 +245,7 @@ class PlayStorePhoneScreenshotTest(BaseTest):
             await explorer_tab.click()
         except Exception as exc:
             return TestResult(self.name, False, f"Explorer tab not accessible: {exc}")
+        await self.logic.expand_demo_tree(page)
         await take("explorer")
 
         # Git status expansion
@@ -184,7 +258,10 @@ class PlayStorePhoneScreenshotTest(BaseTest):
         await take("git_status")
 
         # Diff button
-        diff_btn = page.locator(".git-action-btn.diff").first
+        staged_app = page.locator(".git-file-list .file-item").filter(
+            has=page.locator(".git-file-name-text", has_text="app.py")
+        ).first
+        diff_btn = staged_app.locator(".git-action-btn.diff").first
         try:
             await diff_btn.wait_for(timeout=5000)
             await diff_btn.click()
@@ -216,8 +293,8 @@ class PlayStorePhoneScreenshotTest(BaseTest):
                 await terminal_input.wait_for(timeout=10000)
                 await terminal_input.focus()
                 await page.keyboard.type(
-                    "clear && echo 'Portacode Demo preflight' && "
-                    "python3 -m py_compile app.py && "
+                    "clear && echo 'Pulseboard API preflight' && "
+                    "python3 -m py_compile src/pulseboard/*.py && "
                     "echo 'Python checks passed' && git status --short",
                     delay=2,
                 )
@@ -306,7 +383,10 @@ class PlayStoreTabletScreenshotTest(BaseTest):
         result = await click_and_wait(git_info, "Git branch info", "git_status")
         if result:
             return result
-        git_diff_btn = page.locator(".git-action-btn.diff").first
+        staged_app = page.locator(".git-file-list .file-item").filter(
+            has=page.locator(".git-file-name-text", has_text="app.py")
+        ).first
+        git_diff_btn = staged_app.locator(".git-action-btn.diff").first
         result = await click_and_wait(git_diff_btn, "Git diff button", "git_version_control")
         if result:
             return result

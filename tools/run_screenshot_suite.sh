@@ -25,7 +25,7 @@ fi
 : "${SCREENSHOT_USERNAME:?SCREENSHOT_USERNAME missing in $ENV_FILE}"
 : "${SCREENSHOT_PASSWORD:?SCREENSHOT_PASSWORD missing in $ENV_FILE}"
 : "${TEST_BASE_URL:=http://localhost:8001/}"
-: "${PLAY_STORE_DEVICE_LABEL:=Screenshot Demo}"
+: "${PLAY_STORE_DEVICE_LABEL:=Atlas Development}"
 export TEST_BASE_URL PLAY_STORE_DEVICE_LABEL
 
 mkdir -p "$OUT_DIR"
