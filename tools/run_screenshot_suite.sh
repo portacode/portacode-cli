@@ -5,6 +5,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="$ROOT_DIR/test_results/screenshot_runs"
 STATIC_DIR="$ROOT_DIR/server/portacode_django/static/images/marketing"
+mkdir -p "$ROOT_DIR/test_results"
+STAGING_DIR="$(mktemp -d "$ROOT_DIR/test_results/marketing-stage.XXXXXX")"
+
+cleanup() {
+    rm -rf "$STAGING_DIR"
+}
+trap cleanup EXIT
 
 ENV_FILE="$ROOT_DIR/.env.play_store"
 if [[ -f "$ENV_FILE" ]]; then
@@ -17,13 +24,12 @@ fi
 
 : "${SCREENSHOT_USERNAME:?SCREENSHOT_USERNAME missing in $ENV_FILE}"
 : "${SCREENSHOT_PASSWORD:?SCREENSHOT_PASSWORD missing in $ENV_FILE}"
+: "${TEST_BASE_URL:=http://localhost:8001/}"
+: "${PLAY_STORE_DEVICE_LABEL:=Screenshot Demo}"
+export TEST_BASE_URL PLAY_STORE_DEVICE_LABEL
 
-echo "🧹 Resetting test_results directory..."
-rm -rf "$ROOT_DIR/test_results"
 mkdir -p "$OUT_DIR"
-echo "🧽 Refreshing marketing static assets..."
-rm -rf "$STATIC_DIR"
-mkdir -p "$STATIC_DIR"
+echo "🧪 Generating screenshots in staging: $STAGING_DIR"
 
 run_profile() {
     local profile_name=$1
@@ -39,10 +45,19 @@ run_profile() {
         SCREENSHOT_DEVICE_NAME="$profile_name" \
         ALLOW_EMPTY_SESSIONS=true \
         "$@" \
-        python -m testing_framework.cli run-tests "$test_name"
+        python -m testing_framework.cli --use-existing-portacode run-tests "$test_name"
 
     local latest_run
     latest_run=$(ls -dt "$ROOT_DIR"/test_results/run_* | head -n 1)
+    python - "$latest_run/summary.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as summary_file:
+    summary = json.load(summary_file)
+if summary["statistics"]["failed"] or not summary["statistics"]["passed"]:
+    raise SystemExit("Screenshot test failed; existing marketing assets were not changed")
+PY
     local recording_dir
     recording_dir=$(ls -d "$latest_run"/recordings/shared_session_* | head -n 1)
     local profile_dir="$OUT_DIR/${profile_name}"
@@ -51,11 +66,10 @@ run_profile() {
     cp "$recording_dir"/screenshots/*.png "$profile_dir"/
     echo "Stored screenshots for ${profile_name} in $profile_dir"
 
-    local static_target="$STATIC_DIR/${profile_name}"
-    rm -rf "$static_target"
-    mkdir -p "$static_target"
-    cp "$profile_dir"/*.png "$static_target"/
-    echo "Synced ${profile_name} screenshots to $static_target"
+    local staged_target="$STAGING_DIR/${profile_name}"
+    mkdir -p "$staged_target"
+    cp "$profile_dir"/*.png "$staged_target"/
+    echo "Staged ${profile_name} screenshots in $staged_target"
 }
 
 GALAXY_UA="Mozilla/5.0 (Linux; Android 13; SAMSUNG SM-S908U) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Mobile Safari/537.36"
@@ -90,3 +104,29 @@ run_profile tablet_10_inch play_store_tablet_screenshot_test \
     TEST_VIDEO_WIDTH=1600 \
     TEST_VIDEO_HEIGHT=2560 \
     SCREENSHOT_ZOOM=1.0
+
+[[ $(find "$STAGING_DIR/phone_s22_ultra" -maxdepth 1 -name '*.png' | wc -l) -eq 12 ]]
+[[ $(find "$STAGING_DIR/tablet_7_inch" -maxdepth 1 -name '*.png' | wc -l) -eq 10 ]]
+[[ $(find "$STAGING_DIR/tablet_10_inch" -maxdepth 1 -name '*.png' | wc -l) -eq 10 ]]
+
+# Linux renameat2(RENAME_EXCHANGE) swaps two populated directories in one
+# filesystem operation. If it is unavailable, fail before changing the live
+# directory instead of exposing a missing or partial asset tree.
+python - "$STATIC_DIR" "$STAGING_DIR" <<'PY'
+import ctypes
+import os
+import sys
+
+live, staged = map(os.fsencode, sys.argv[1:])
+libc = ctypes.CDLL(None, use_errno=True)
+renameat2 = getattr(libc, "renameat2", None)
+if renameat2 is None:
+    raise SystemExit("Atomic directory exchange is not supported; live assets were not changed")
+AT_FDCWD = -100
+RENAME_EXCHANGE = 2
+if renameat2(AT_FDCWD, live, AT_FDCWD, staged, RENAME_EXCHANGE) != 0:
+    error = ctypes.get_errno()
+    raise OSError(error, os.strerror(error))
+PY
+
+echo "✅ Published all marketing screenshots with one atomic directory exchange"

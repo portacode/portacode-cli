@@ -6,7 +6,7 @@ from urllib.parse import urljoin
 from testing_framework.core.base_test import BaseTest, TestResult, TestCategory
 
 
-DEVICE_LABEL = os.getenv("PLAY_STORE_DEVICE_LABEL", "Workshop Seat 01")
+DEVICE_LABEL = os.getenv("PLAY_STORE_DEVICE_LABEL")
 
 
 class PlayStoreScreenshotLogic:
@@ -24,6 +24,17 @@ class PlayStoreScreenshotLogic:
                 f"document.body.style.zoom='{percent}%'"
             )
 
+    async def open_first_codex_thread(self, page):
+        """Open the first current Codex thread, including compact layouts."""
+        thread = page.locator("codex-chat .thread").first
+        open_chats = page.locator(
+            'codex-chat button[aria-label="Open chats"]'
+        ).first
+        if await open_chats.count() and await open_chats.is_visible():
+            await open_chats.click()
+        await thread.wait_for(timeout=5000)
+        await thread.click(force=True)
+
     async def capture(self, test_instance, post_editor_steps=None) -> TestResult:
         page = test_instance.playwright_manager.page
         base_url = test_instance.playwright_manager.base_url
@@ -32,19 +43,26 @@ class PlayStoreScreenshotLogic:
         await page.goto(urljoin(base_url, "/dashboard/"))
         await page.wait_for_load_state("networkidle")
 
-        # Locate specific device card and ensure it's online
+        # Prefer an explicitly named fixture, but otherwise use whichever
+        # online device the screenshot account currently owns.
+        online_cards = page.locator(".device-card.online")
         device_card = (
-            page.locator(".device-card.online")
-            .filter(has_text=self.device_label)
-            .first
+            online_cards.filter(has_text=self.device_label).first
+            if self.device_label
+            else online_cards.first
         )
         try:
             await device_card.wait_for(timeout=10000)
         except Exception:
+            expected_device = (
+                f"Device '{self.device_label}'"
+                if self.device_label
+                else "An online device"
+            )
             return TestResult(
                 test_instance.name,
                 False,
-                f"Device '{self.device_label}' is not online or not visible",
+                f"{expected_device} is not available to the screenshot account",
             )
 
         # Scroll past navbar and capture dashboard screenshot
@@ -65,7 +83,7 @@ class PlayStoreScreenshotLogic:
             return TestResult(
                 test_instance.name,
                 False,
-                f"Failed to open editor for {self.device_label}: {exc}",
+                f"Failed to open editor from the selected online device: {exc}",
             )
 
         # Select the first project in the modal
@@ -182,6 +200,35 @@ class PlayStorePhoneScreenshotTest(BaseTest):
             await terminal_tab.click()
         except Exception as exc:
             return TestResult(self.name, False, f"Terminal tab not accessible: {exc}")
+
+        # Populate a fresh fixture terminal so the marketing capture shows a
+        # useful current workflow instead of the empty-terminal placeholder.
+        terminal_input = page.locator(
+            "code-terminal .xterm-helper-textarea"
+        ).first
+        if not await terminal_input.count():
+            add_terminal = page.locator(
+                "code-terminal .add-terminal-btn"
+            ).first
+            try:
+                await add_terminal.wait_for(timeout=5000)
+                await add_terminal.click()
+                await terminal_input.wait_for(timeout=10000)
+                await terminal_input.focus()
+                await page.keyboard.type(
+                    "clear && echo 'Portacode Demo preflight' && "
+                    "python3 -m py_compile app.py && "
+                    "echo 'Python checks passed' && git status --short",
+                    delay=2,
+                )
+                await page.keyboard.press("Enter")
+                await page.wait_for_timeout(2000)
+            except Exception as exc:
+                return TestResult(
+                    self.name,
+                    False,
+                    f"Could not prepare terminal screenshot: {exc}",
+                )
         await take("terminal")
 
         # AI Chat tab
@@ -193,13 +240,11 @@ class PlayStorePhoneScreenshotTest(BaseTest):
             return TestResult(self.name, False, f"AI Chat tab not accessible: {exc}")
         await take("ai_chat")
 
-        # First chat item
-        chat_item = page.locator(".chat-item").first
+        # First current Codex thread
         try:
-            await chat_item.wait_for(timeout=5000)
-            await chat_item.click()
+            await self.logic.open_first_codex_thread(page)
         except Exception as exc:
-            return TestResult(self.name, False, f"No AI chat history available: {exc}")
+            return TestResult(self.name, False, f"No Codex chat history available: {exc}")
         await take("ai_chat_thread")
 
         return TestResult(
@@ -271,10 +316,14 @@ class PlayStoreTabletScreenshotTest(BaseTest):
         result = await click_and_wait(ai_chat_toggle, "AI Chat toggle")
         if result:
             return result
-        chat_item = page.locator(".chat-item").first
-        result = await click_and_wait(chat_item, "AI chat conversation", "ai_chat_thread_tablet")
-        if result:
-            return result
+        try:
+            await self.logic.open_first_codex_thread(page)
+        except Exception as exc:
+            return TestResult(self.name, False, f"Failed to open Codex chat conversation: {exc}")
+        await page.wait_for_timeout(500)
+        await manager.take_screenshot(
+            f"{self.logic.device_name}_ai_chat_thread_tablet"
+        )
 
         # 3. Expand terminal, collapse file explorer, capture
         terminal_tab = page.locator('.persistent-toggle.terminal-toggle-center')

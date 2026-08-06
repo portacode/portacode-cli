@@ -45,11 +45,20 @@ def setup_logging(debug: bool = False):
 
 @click.group()
 @click.option('--debug', is_flag=True, help='Enable debug logging')
+@click.option(
+    '--use-existing-portacode',
+    is_flag=True,
+    envvar='TEST_USE_EXISTING_PORTACODE',
+    help='Use the existing Portacode service connection without starting or replacing it.',
+)
 @click.pass_context
-def cli(ctx, debug):
+def cli(ctx, debug, use_existing_portacode):
     """Modular Testing Framework for Portacode"""
     ctx.ensure_object(dict)
     ctx.obj['debug'] = debug
+    ctx.obj['use_existing_portacode'] = use_existing_portacode
+    if use_existing_portacode:
+        os.environ['TEST_USE_EXISTING_PORTACODE'] = 'true'
     setup_logging(debug)
 
 
@@ -196,7 +205,10 @@ def _create_progress_callback():
         if event == 'start':
             # Show CLI connected message only once
             if not cli_connected_shown:
-                click.echo("\r🔗 Shared CLI connection established ✅")
+                if os.getenv('TEST_USE_EXISTING_PORTACODE', 'false').lower() in ('1', 'true', 'yes'):
+                    click.echo("\r🔗 Using existing Portacode connection ✅")
+                else:
+                    click.echo("\r🔗 Shared CLI connection established ✅")
                 cli_connected_shown = True
             # Clean one-line output for test start  
             click.echo(f"[{current}/{total}] 🔄 {test.name}", nl=False)

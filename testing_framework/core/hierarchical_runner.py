@@ -334,14 +334,17 @@ class HierarchicalTestRunner(TestRunner):
             test.set_cli_manager(cli_manager)
             test.set_playwright_manager(self._shared_playwright_manager)
             
-            # Ensure CLI connection with --debug flag
-            cli_connected = await cli_manager.connect(debug=True)
-            if not cli_connected:
-                return TestResult(
-                    test.name, False, 
-                    "Failed to establish CLI connection",
-                    time.time() - test_start
-                )
+            # UI-only runs can use the device connection already maintained by
+            # the Portacode system service. Never start a competing process in
+            # that mode because non-interactive connect replaces the lock owner.
+            if not self.use_existing_portacode:
+                cli_connected = await cli_manager.connect(debug=True)
+                if not cli_connected:
+                    return TestResult(
+                        test.name, False,
+                        "Failed to establish CLI connection",
+                        time.time() - test_start
+                    )
             
             # Run test setup
             self.logger.info(f"Running setup for {test.name}")

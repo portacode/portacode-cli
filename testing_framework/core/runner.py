@@ -40,6 +40,13 @@ class TestRunner:
         self.results: List[TestResult] = []
         self.start_time: Optional[float] = None
         self.end_time: Optional[float] = None
+
+        # Some UI tests exercise a device that is already connected by the
+        # system service. Starting another non-interactive connection would
+        # replace that service process, so allow those runs to leave it alone.
+        self.use_existing_portacode = os.getenv(
+            "TEST_USE_EXISTING_PORTACODE", "false"
+        ).lower() in ("1", "true", "yes")
         
     async def run_all_tests(self, progress_callback=None) -> Dict[str, Any]:
         """Run all discovered tests."""
@@ -145,13 +152,14 @@ class TestRunner:
         
         try:
             # Step 1: Ensure CLI connection (will reuse existing if available)
-            cli_connected = await cli_manager.connect()
-            if not cli_connected:
-                return TestResult(
-                    test.name, False, 
-                    "Failed to establish CLI connection",
-                    time.time() - test_start
-                )
+            if not self.use_existing_portacode:
+                cli_connected = await cli_manager.connect()
+                if not cli_connected:
+                    return TestResult(
+                        test.name, False,
+                        "Failed to establish CLI connection",
+                        time.time() - test_start
+                    )
             
             # Step 2: Start Playwright session
             self.logger.info(f"Starting Playwright session for {test.name}")
