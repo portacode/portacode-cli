@@ -1,5 +1,6 @@
 """File operation handlers for demonstrating the send_command functionality."""
 
+import base64
 import os
 import logging
 import fnmatch
@@ -105,6 +106,54 @@ class FileReadHandler(SyncHandler):
             "has_more_after": has_more_after,
             "encoding": encoding,
         }
+
+
+class ImageReadHandler(SyncHandler):
+    """Return a small local image as base64 for an authorized remote viewer."""
+
+    MAX_IMAGE_BYTES = 2 * 1024 * 1024
+
+    @property
+    def command_name(self) -> str:
+        return "image_read"
+
+    def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        file_path = message.get("path")
+        if not file_path:
+            raise ValueError("path parameter is required")
+        path = Path(file_path)
+        if not path.is_file():
+            raise ValueError(f"Image file not found: {file_path}")
+        size = path.stat().st_size
+        if size > self.MAX_IMAGE_BYTES:
+            raise ValueError(
+                f"Image is too large to inspect ({size} bytes; maximum {self.MAX_IMAGE_BYTES})"
+            )
+        content = path.read_bytes()
+        mime_type = self._detect_mime_type(content)
+        if not mime_type:
+            raise ValueError("The selected file is not a supported image")
+        return {
+            "event": "image_read_response",
+            "path": str(path),
+            "mime_type": mime_type,
+            "size": size,
+            "content_base64": base64.b64encode(content).decode("ascii"),
+        }
+
+    @staticmethod
+    def _detect_mime_type(content: bytes) -> Optional[str]:
+        if content.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg"
+        if content.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if content.startswith((b"GIF87a", b"GIF89a")):
+            return "image/gif"
+        if content.startswith(b"BM"):
+            return "image/bmp"
+        if len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+            return "image/webp"
+        return None
 
     @staticmethod
     def _coerce_positive_int(

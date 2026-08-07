@@ -18,6 +18,7 @@ from .system_handlers import SystemInfoHandler
 from .update_handler import UpdatePortacodeHandler
 from .file_handlers import (
     FileReadHandler,
+    ImageReadHandler,
     FileWriteHandler,
     DirectoryListHandler,
     FileInfoHandler,
@@ -95,6 +96,7 @@ __all__ = [
     "CreateProxmoxContainerHandler",
     # File operation handlers (optional - register as needed)
     "FileReadHandler",
+    "ImageReadHandler",
     "FileWriteHandler", 
     "DirectoryListHandler",
     "FileInfoHandler",

@@ -35,6 +35,7 @@ from .handlers import (
     TerminalExecHandler,
     SystemInfoHandler,
     FileReadHandler,
+    ImageReadHandler,
     DirectoryListHandler,
     FileInfoHandler,
     FileDeleteHandler,
@@ -533,6 +534,7 @@ class TerminalManager:
         self._command_registry.register(SystemInfoHandler)
         # File operation handlers
         self._command_registry.register(FileReadHandler)
+        self._command_registry.register(ImageReadHandler)
         self._command_registry.register(ProjectAwareFileWriteHandler)  # Use project-aware version
         self._command_registry.register(DirectoryListHandler)
         self._command_registry.register(FileInfoHandler)
