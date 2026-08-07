@@ -69,7 +69,7 @@ class FileSystemWatcher:
                 logger.debug("🔍 [TRACE] FileSystemWatcher detected event: %s on path: %s", event.event_type, event.src_path)
                 
                 # Skip debug files to avoid feedback loops
-                if event.src_path.endswith('project_state_debug.json'):
+                if os.path.basename(event.src_path).startswith('project_state_debug.json'):
                     logger.debug("🔍 [TRACE] Skipping debug file: %s", event.src_path)
                     return
                 
