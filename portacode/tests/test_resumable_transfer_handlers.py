@@ -185,7 +185,7 @@ def test_destination_reports_peak_storage_deficit(tmp_path, monkeypatch):
     assert f"short by {required - available} bytes" in message
 
 
-def test_folder_finalize_rejects_symlink_chain_archive(tmp_path, monkeypatch):
+def test_folder_finalize_rejects_members_nested_below_symlink(tmp_path, monkeypatch):
     cache = tmp_path / "cache"
     monkeypatch.setenv("PORTACODE_TRANSFER_CACHE_DIR", str(cache))
     transfer_id = str(uuid.uuid4())
@@ -216,7 +216,7 @@ def test_folder_finalize_rejects_symlink_chain_archive(tmp_path, monkeypatch):
         "content_base64": __import__("base64").b64encode(payload.read_bytes()).decode(),
     })
     assert received["progress_percent"] == 100
-    with pytest.raises(ValueError, match="Archive links are forbidden"):
+    with pytest.raises(ValueError, match="nested below a link"):
         _handler(TransferFinalizeHandler).execute(common)
     assert not (tmp_path / "output").exists()
 
@@ -243,14 +243,45 @@ def test_destination_stages_on_destination_filesystem_and_cancel_cleans_it(tmp_p
     assert not (cache / transfer_id).exists()
 
 
-def test_folder_source_rejects_links_before_archiving(tmp_path, monkeypatch):
+def test_folder_transfer_preserves_relative_and_broken_symlinks(tmp_path, monkeypatch):
     source = tmp_path / "source"
     source.mkdir()
     (source / "real.txt").write_text("data", encoding="utf-8")
     (source / "link.txt").symlink_to("real.txt")
+    (source / "broken.txt").symlink_to("missing.txt")
+    source_cache = tmp_path / "source-cache"
+    destination_cache = tmp_path / "destination-cache"
+    monkeypatch.setenv("PORTACODE_TRANSFER_CACHE_DIR", str(source_cache))
+    prepared = _handler(TransferPrepareHandler).execute({
+        "role": "source", "kind": "folder", "path": str(source),
+        "transfer_id": str(uuid.uuid4()), "authorization_token": TOKEN,
+    })
+    destination = tmp_path / "restored"
+    _copy_all_chunks(source_cache, destination_cache, prepared, destination)
+    assert (destination / "link.txt").is_symlink()
+    assert os.readlink(destination / "link.txt") == "real.txt"
+    assert (destination / "link.txt").read_text(encoding="utf-8") == "data"
+    assert (destination / "broken.txt").is_symlink()
+    assert os.readlink(destination / "broken.txt") == "missing.txt"
+
+
+def test_folder_prepare_reports_scan_archive_and_hash_progress(tmp_path, monkeypatch):
+    source = tmp_path / "progress-folder"
+    source.mkdir()
+    (source / "one.bin").write_bytes(b"a" * (1024 * 1024 + 1))
+    (source / "two.txt").write_text("two", encoding="utf-8")
     monkeypatch.setenv("PORTACODE_TRANSFER_CACHE_DIR", str(tmp_path / "cache"))
-    with pytest.raises(ValueError, match="do not support symbolic links"):
-        _handler(TransferPrepareHandler).execute({
-            "role": "source", "kind": "folder", "path": str(source),
-            "transfer_id": str(uuid.uuid4()), "authorization_token": TOKEN,
-        })
+    updates = []
+
+    prepared = _handler(TransferPrepareHandler).execute({
+        "role": "source", "kind": "folder", "path": str(source),
+        "transfer_id": str(uuid.uuid4()), "authorization_token": TOKEN,
+        "_progress_callback": lambda phase, percent, completed, total: updates.append(
+            (phase, percent, completed, total)
+        ),
+    })
+
+    assert prepared["archive_format"] == "tar"
+    assert {update[0] for update in updates} == {"scanning", "archiving", "hashing"}
+    assert any(update[0] == "archiving" and update[1] == 100 for update in updates)
+    assert any(update[0] == "hashing" and update[1] == 100 for update in updates)

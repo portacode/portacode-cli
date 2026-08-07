@@ -8,6 +8,7 @@ force the transfer to begin again.
 from __future__ import annotations
 
 import base64
+import asyncio
 import hashlib
 import hmac
 import json
@@ -111,11 +112,16 @@ def _filesystem_block_size(path: Path) -> int:
     return max(int(details.f_frsize or details.f_bsize or 4096), 512)
 
 
-def _hash_file(path: Path) -> str:
+def _hash_file(path: Path, progress_callback=None) -> str:
     digest = hashlib.sha256()
+    total = max(path.stat().st_size, 1)
+    completed = 0
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
+            completed += len(block)
+            if progress_callback:
+                progress_callback("hashing", min(completed * 100 / total, 100), None, None)
     return digest.hexdigest()
 
 
@@ -130,22 +136,24 @@ def _file_metadata(path: Path) -> Dict[str, Any]:
     }
 
 
-def _folder_metrics(path: Path) -> Dict[str, int]:
+def _folder_metrics(path: Path, progress_callback=None) -> Dict[str, int]:
     logical = 0
     allocated = 0
     entries = 1
     for root, directories, files in os.walk(path, followlinks=False):
         entries += len(directories) + len(files)
+        if progress_callback:
+            progress_callback("scanning", None, entries, None)
         for name in directories:
             item = Path(root) / name
             info = item.lstat()
             if stat.S_ISLNK(info.st_mode):
-                raise ValueError(f"Folder transfers do not support symbolic links: {item}")
+                continue
         for name in files:
             item = Path(root) / name
             info = item.lstat()
             if stat.S_ISLNK(info.st_mode):
-                raise ValueError(f"Folder transfers do not support symbolic links: {item}")
+                continue
             if not stat.S_ISREG(info.st_mode):
                 raise ValueError(f"Folder transfers do not support special files: {item}")
             logical += info.st_size
@@ -222,7 +230,7 @@ def _cleanup_destination_staging(manifest: Dict[str, Any]) -> None:
             pass
 
 
-def _prepare_source(message: Dict[str, Any]) -> Dict[str, Any]:
+def _prepare_source(message: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
     transfer_id = _transfer_id(message.get("transfer_id"))
     token = _authorization_token(message.get("authorization_token"))
     source = Path(str(message.get("path") or "")).expanduser().resolve()
@@ -249,7 +257,7 @@ def _prepare_source(message: Dict[str, Any]) -> Dict[str, Any]:
         shutil.rmtree(job_dir, ignore_errors=True)
         raise ValueError(f"Transfer payload exceeds the {MAX_TRANSFER_PAYLOAD_BYTES} byte limit")
     if kind == "folder":
-        metrics = _folder_metrics(source)
+        metrics = _folder_metrics(source, progress_callback)
         if metrics["entry_count"] > MAX_TRANSFER_ENTRIES:
             shutil.rmtree(job_dir, ignore_errors=True)
             raise ValueError(f"Folder exceeds the {MAX_TRANSFER_ENTRIES} entry limit")
@@ -265,8 +273,18 @@ def _prepare_source(message: Dict[str, Any]) -> Dict[str, Any]:
                                  available=available, archive=estimate, extraction=0)
         payload = job_dir / "payload.tar"
         try:
+            archived_entries = 0
+            def archive_progress(info):
+                nonlocal archived_entries
+                archived_entries += 1
+                if progress_callback:
+                    progress_callback(
+                        "archiving", min(archived_entries * 100 / max(metrics["entry_count"], 1), 100),
+                        archived_entries, metrics["entry_count"],
+                    )
+                return info
             with tarfile.open(payload, "w", format=tarfile.PAX_FORMAT, dereference=False) as archive:
-                archive.add(source, arcname=source.name, recursive=True)
+                archive.add(source, arcname=source.name, recursive=True, filter=archive_progress)
         except Exception:
             shutil.rmtree(job_dir, ignore_errors=True)
             raise
@@ -288,7 +306,7 @@ def _prepare_source(message: Dict[str, Any]) -> Dict[str, Any]:
         "name": source.name,
         "payload_path": str(payload),
         "payload_size": payload_size,
-        "payload_hash": _hash_file(payload),
+        "payload_hash": _hash_file(payload, progress_callback),
         "chunk_size": chunk_size,
         "chunk_count": max(1, math.ceil(payload_size / chunk_size)),
         "completed_chunks": [],
@@ -452,7 +470,9 @@ def _receive_chunk(message: Dict[str, Any]) -> Dict[str, Any]:
 
 def _safe_members(archive: tarfile.TarFile, root: Path) -> Iterable[tarfile.TarInfo]:
     root_resolved = root.resolve()
-    for member in archive.getmembers():
+    members = archive.getmembers()
+    link_paths = {PurePosixPath(member.name) for member in members if member.issym() or member.islnk()}
+    for member in members:
         pure = PurePosixPath(member.name)
         if pure.is_absolute() or ".." in pure.parts or not pure.parts:
             raise ValueError(f"Unsafe archive path: {member.name}")
@@ -461,12 +481,30 @@ def _safe_members(archive: tarfile.TarFile, root: Path) -> Iterable[tarfile.TarI
             raise ValueError(f"Archive path escapes destination: {member.name}")
         if member.ischr() or member.isblk() or member.isfifo():
             raise ValueError(f"Unsupported special file in archive: {member.name}")
-        # Reject links entirely.  Merely checking each link target is not
-        # sufficient because a later member can traverse a symlink created by
-        # an earlier member during extraction.
-        if member.issym() or member.islnk():
-            raise ValueError(f"Archive links are forbidden: {member.name}")
+        if any(parent in link_paths for parent in pure.parents if parent != PurePosixPath(".")):
+            raise ValueError(f"Archive member is nested below a link: {member.name}")
+        if member.islnk():
+            target = PurePosixPath(member.linkname)
+            if target.is_absolute() or ".." in target.parts or target not in {PurePosixPath(item.name) for item in members}:
+                raise ValueError(f"Unsafe archive hard link: {member.name}")
         yield member
+
+
+def _extract_members_preserving_links(archive: tarfile.TarFile, root: Path,
+                                      members: Iterable[tarfile.TarInfo]) -> None:
+    """Extract data before links so no archive write can traverse a link."""
+    members = list(members)
+    ordinary = [member for member in members if not member.issym() and not member.islnk()]
+    archive.extractall(root, members=ordinary, numeric_owner=True)
+    for member in (item for item in members if item.islnk()):
+        destination = root / Path(*PurePosixPath(member.name).parts)
+        target = root / Path(*PurePosixPath(member.linkname).parts)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        os.link(target, destination, follow_symlinks=False)
+    for member in (item for item in members if item.issym()):
+        destination = root / Path(*PurePosixPath(member.name).parts)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(member.linkname, destination)
 
 
 def _apply_metadata(path: Path, metadata: Dict[str, Any]) -> Dict[str, bool]:
@@ -578,7 +616,7 @@ def _finalize(message: Dict[str, Any]) -> Dict[str, Any]:
             members = list(_safe_members(archive, extraction_root))
             if len(members) != int(manifest.get("entry_count") or len(members)):
                 raise ValueError("Archive entry count differs from the authorized manifest")
-            archive.extractall(extraction_root, members=members, numeric_owner=True)
+            _extract_members_preserving_links(archive, extraction_root, members)
             metadata_result = _restore_archive_metadata(extraction_root, members)
         roots = list(extraction_root.iterdir())
         if len(roots) != 1:
@@ -604,10 +642,38 @@ class TransferPrepareHandler(SyncHandler):
     def command_name(self) -> str:
         return "transfer_prepare"
 
+    async def handle(self, message: Dict[str, Any], reply_channel=None) -> None:
+        loop = asyncio.get_running_loop()
+        project_id = message.get("project_id")
+        request_id = message.get("request_id")
+        last_sent = {"phase": None, "percent": None, "time": 0.0}
+
+        def progress(phase, percent, completed_entries, total_entries):
+            now = time.monotonic()
+            rounded = None if percent is None else round(float(percent), 1)
+            if phase == last_sent["phase"] and now - last_sent["time"] < 0.5:
+                previous = last_sent["percent"]
+                if rounded is None or (previous is not None and abs(rounded - previous) < 1):
+                    return
+            last_sent.update({"phase": phase, "percent": rounded, "time": now})
+            payload = {
+                "event": "transfer_prepare_progress", "request_id": request_id,
+                "phase": phase, "progress_percent": rounded,
+                "completed_entries": completed_entries, "total_entries": total_entries,
+            }
+            future = asyncio.run_coroutine_threadsafe(
+                self.send_response(payload, reply_channel, project_id), loop,
+            )
+            future.result()
+
+        prepared_message = dict(message)
+        prepared_message["_progress_callback"] = progress
+        await super().handle(prepared_message, reply_channel)
+
     def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
         _cleanup_expired()
         role = str(message.get("role") or "")
-        result = _prepare_source(message) if role == "source" else _prepare_destination(message) if role == "destination" else None
+        result = _prepare_source(message, message.get("_progress_callback")) if role == "source" else _prepare_destination(message) if role == "destination" else None
         if result is None:
             raise ValueError("role must be source or destination")
         return {"event": "transfer_prepared", **result}
