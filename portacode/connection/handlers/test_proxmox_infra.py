@@ -1,6 +1,7 @@
 from unittest import TestCase
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
-import os
 
 from portacode.connection.handlers.proxmox_infra import (
     RemoveProxmoxContainerHandler,
@@ -10,12 +11,17 @@ from portacode.connection.handlers.proxmox_infra import (
     _enforce_service_venv_execstart,
     _get_provisioning_user_info,
     _instantiate_container,
+    _legacy_cache_archive_matches,
+    _remove_legacy_cache_archives,
     _list_templates,
+    _clone_native_template,
+    _find_native_template,
+    _garbage_collect_stale_native_templates,
+    _native_template_dependents,
+    _reconcile_native_template_registry,
     _resolve_user_data_dir,
-    _provisioning_cache_filename,
     _pinned_portacode_install_command,
     _sanitize_project_paths,
-    _save_provisioning_cache,
 )
 
 
@@ -52,13 +58,43 @@ class ProxmoxInfraHandlerTests(TestCase):
         steps = _build_bootstrap_steps("svcuser", "pass", "", include_portacode_connect=False)
         self.assertFalse(any(step.get("name") == "portacode_connect" for step in steps))
 
-    def test_cache_name_is_versioned_and_bound_to_exact_source(self):
-        ubuntu = _provisioning_cache_filename("local:vztmpl/ubuntu-26.04.tar.zst")
-        debian = _provisioning_cache_filename("local:vztmpl/debian-13.tar.zst")
+    def test_legacy_cleanup_namespace_does_not_match_unrelated_backups(self):
+        self.assertTrue(
+            _legacy_cache_archive_matches(
+                "local:vztmpl/portacode-ready-ubuntu-abc-0123456789ab-2026-08-07.4.tar.zst"
+            )
+        )
+        self.assertFalse(
+            _legacy_cache_archive_matches(
+                "backup:vztmpl/vzdump-lxc-138-2026_08_07.tar.zst"
+            )
+        )
+        self.assertFalse(
+            _legacy_cache_archive_matches("local:vztmpl/portacode-important.tar.zst")
+        )
 
-        self.assertIn("portacode-ready", ubuntu)
-        self.assertNotEqual(ubuntu, debian)
-        self.assertTrue(ubuntu.endswith(".tar.zst"))
+    @patch("portacode.connection.handlers.proxmox_infra._call_subprocess")
+    def test_legacy_cleanup_deletes_only_exact_portacode_cache_archives(self, mock_call):
+        mock_call.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        proxmox = MagicMock()
+        proxmox.nodes.return_value.storage.return_value.content.get.return_value = [
+            {
+                "content": "vztmpl",
+                "volid": "local:vztmpl/portacode-ready-ubuntu-0123456789ab-2026-08-07.4.tar.zst",
+            },
+            {
+                "content": "vztmpl",
+                "volid": "local:vztmpl/vzdump-lxc-138-2026_08_07.tar.zst",
+            },
+            {"content": "backup", "volid": "local:backup/portacode-ready-important"},
+        ]
+
+        removed = _remove_legacy_cache_archives(
+            proxmox, "pve", [{"storage": "local"}]
+        )
+
+        self.assertEqual(len(removed), 1)
+        mock_call.assert_called_once_with(["pvesm", "free", removed[0]], check=False)
 
     def test_internal_ready_archives_are_hidden_from_source_template_list(self):
         client = MagicMock()
@@ -104,34 +140,333 @@ class ProxmoxInfraHandlerTests(TestCase):
         self.assertIn("portacode==1.5.21.dev7", command)
         self.assertNotEqual(command.rsplit(" ", 1)[-1], "portacode")
 
-    @patch("portacode.connection.handlers.proxmox_infra._start_container")
-    @patch("portacode.connection.handlers.proxmox_infra._stop_container")
-    @patch("portacode.connection.handlers.proxmox_infra._sanitize_container_for_cache")
-    @patch("portacode.connection.handlers.proxmox_infra._pvesm_path")
-    @patch("portacode.connection.handlers.proxmox_infra._call_subprocess")
-    def test_vzdump_staging_directory_is_traversable_by_mapped_lxc_user(
-        self, mock_call, mock_path, _mock_sanitize, _mock_stop, _mock_start
+    @patch(
+        "portacode.connection.handlers.proxmox_infra._wait_for_task",
+        return_value=({"exitstatus": "OK"}, 0.1),
+    )
+    def test_native_cache_uses_linked_clone_and_records_parent_marker(self, _mock_wait):
+        proxmox = MagicMock()
+        proxmox.nodes.return_value.lxc.return_value.clone.post.return_value = "UPID:clone"
+        payload = {
+            "hostname": "child",
+            "storage": "local-lvm",
+            "disk_gib": 8,
+            "cache_template_disk_gib": 8,
+            "ram_mib": 1024,
+            "swap_mb": 0,
+            "cores": 1,
+            "cpus": 0.5,
+            "cpulimit": 0.5,
+            "net0": "name=eth0,bridge=vmbr1,ip=dhcp",
+            "description": "portacode-managed:true",
+            "device_id": "1069",
+            "provisioning_id": "abc",
+        }
+
+        _clone_native_template(proxmox, "pve", 900, 139, payload)
+
+        clone_kwargs = proxmox.nodes.return_value.lxc.return_value.clone.post.call_args.kwargs
+        self.assertEqual(clone_kwargs["full"], 0)
+        self.assertNotIn("storage", clone_kwargs)
+        config_kwargs = proxmox.nodes.return_value.lxc.return_value.config.put.call_args.kwargs
+        self.assertIn("cache_parent=900", config_kwargs["description"])
+
+    @patch("portacode.connection.handlers.proxmox_infra._load_managed_container_records")
+    def test_template_dependents_ignore_records_from_other_nodes(self, mock_records):
+        mock_records.return_value = [
+            {"node": "other", "vmid": 201, "cache_template_vmid": 900}
+        ]
+        proxmox = MagicMock()
+        proxmox.nodes.return_value.lxc.get.return_value = []
+
+        self.assertEqual(_native_template_dependents(proxmox, "pve", 900), set())
+
+    @patch("portacode.connection.handlers.proxmox_infra._proxmox_template_exists")
+    @patch("portacode.connection.handlers.proxmox_infra._load_provisioning_templates")
+    def test_latest_current_template_is_selected_for_exact_lineage(
+        self, mock_load, mock_exists
     ):
-        import tempfile
-        from pathlib import Path
+        from portacode.connection.handlers.proxmox_infra import (
+            PROVISIONING_CACHE_ID,
+            _cache_lineage_key,
+        )
 
-        with tempfile.TemporaryDirectory() as root:
-            destination = Path(root) / "portacode-ready-test.tar.zst"
-            mock_path.return_value = destination
+        source = "local:vztmpl/ubuntu-26.04.tar.zst"
+        lineage = _cache_lineage_key(source, "local-lvm")
+        mock_load.return_value = [
+            {"vmid": 900, "node": "pve", "lineage": lineage, "disk_gib": 4, "cache_id": PROVISIONING_CACHE_ID, "status": "ready", "created_at": "2026-08-07T01:00:00Z"},
+            {"vmid": 901, "node": "pve", "lineage": lineage, "disk_gib": 4, "cache_id": PROVISIONING_CACHE_ID, "status": "ready", "created_at": "2026-08-07T02:00:00Z"},
+            {"vmid": 902, "node": "pve", "lineage": lineage, "disk_gib": 4, "cache_id": "old", "status": "ready", "created_at": "2026-08-07T03:00:00Z"},
+        ]
+        mock_exists.return_value = True
 
-            def fake_call(command, **kwargs):
-                dump_dir = Path(command[command.index("--dumpdir") + 1])
-                self.assertEqual(os.stat(dump_dir).st_mode & 0o777, 0o755)
-                (dump_dir / "vzdump-lxc-123-test.tar.zst").write_bytes(b"archive")
-                return MagicMock(returncode=0, stdout="", stderr="")
+        selected = _find_native_template(
+            MagicMock(), "pve", source, "local-lvm", 8
+        )
 
-            mock_call.side_effect = fake_call
+        self.assertEqual(selected["vmid"], 901)
 
-            _save_provisioning_cache(
-                MagicMock(), "pve", 123, "local:vztmpl/alpine.tar.zst"
+    @patch(
+        "portacode.connection.handlers.proxmox_infra._wait_for_task",
+        side_effect=[
+            ({"exitstatus": "OK"}, 0.1),
+            ({"exitstatus": "OK"}, 0.1),
+        ],
+    )
+    def test_linked_clone_is_expanded_to_requested_disk_size(self, _mock_wait):
+        proxmox = MagicMock()
+        proxmox.nodes.return_value.lxc.return_value.clone.post.return_value = "UPID:clone"
+        proxmox.nodes.return_value.lxc.return_value.resize.put.return_value = "UPID:resize"
+        payload = {
+            "hostname": "child",
+            "storage": "local-lvm",
+            "disk_gib": 10,
+            "cache_template_disk_gib": 4,
+            "ram_mib": 1024,
+            "swap_mb": 0,
+            "cores": 1,
+            "cpus": 1,
+            "net0": "name=eth0,bridge=vmbr1,ip=dhcp",
+            "description": "portacode-managed:true",
+        }
+
+        _clone_native_template(proxmox, "pve", 900, 139, payload)
+
+        proxmox.nodes.return_value.lxc.return_value.resize.put.assert_called_once_with(
+            disk="rootfs", size="10G"
+        )
+
+    @patch("portacode.connection.handlers.proxmox_infra._proxmox_template_exists")
+    @patch("portacode.connection.handlers.proxmox_infra._load_provisioning_templates")
+    def test_template_larger_than_request_is_not_selected(
+        self, mock_load, mock_exists
+    ):
+        from portacode.connection.handlers.proxmox_infra import (
+            PROVISIONING_CACHE_ID,
+            _cache_lineage_key,
+        )
+
+        source = "local:vztmpl/ubuntu-26.04.tar.zst"
+        mock_load.return_value = [{
+            "vmid": 900,
+            "node": "pve",
+            "lineage": _cache_lineage_key(source, "local-lvm"),
+            "disk_gib": 7,
+            "cache_id": PROVISIONING_CACHE_ID,
+            "status": "ready",
+        }]
+
+        selected = _find_native_template(
+            MagicMock(), "pve", source, "local-lvm", 4
+        )
+
+        self.assertIsNone(selected)
+        mock_exists.assert_not_called()
+
+    def _registry_path(self, root: str) -> Path:
+        return Path(root) / "provisioning_templates.json"
+
+    @patch("portacode.connection.handlers.proxmox_infra._call_subprocess")
+    @patch("portacode.connection.handlers.proxmox_infra._native_template_dependents")
+    @patch("portacode.connection.handlers.proxmox_infra._proxmox_template_exists")
+    def test_stale_template_is_retained_until_dependents_are_gone(
+        self, mock_exists, mock_dependents, mock_call
+    ):
+        from portacode.connection.handlers.proxmox_infra import PROVISIONING_CACHE_ID
+        import json
+
+        mock_exists.return_value = True
+        mock_dependents.return_value = {321}
+        with TemporaryDirectory() as root, patch(
+            "portacode.connection.handlers.proxmox_infra.PROVISIONING_TEMPLATES_PATH",
+            self._registry_path(root),
+        ):
+            records = [
+                {"vmid": 900, "node": "pve", "lineage": "lineage", "cache_id": "old", "status": "stale"},
+                {"vmid": 901, "node": "pve", "lineage": "lineage", "cache_id": PROVISIONING_CACHE_ID, "status": "ready"},
+            ]
+            self._registry_path(root).write_text(json.dumps({"templates": records}))
+
+            self.assertEqual(
+                _garbage_collect_stale_native_templates(MagicMock(), "pve"), []
+            )
+            saved = json.loads(self._registry_path(root).read_text())["templates"]
+
+        self.assertEqual(saved[0]["dependent_vmids"], [321])
+        mock_call.assert_not_called()
+
+    @patch("portacode.connection.handlers.proxmox_infra._call_subprocess")
+    @patch("portacode.connection.handlers.proxmox_infra._native_template_dependents")
+    @patch("portacode.connection.handlers.proxmox_infra._proxmox_template_exists")
+    def test_stale_template_is_deleted_only_with_ready_replacement_and_no_dependents(
+        self, mock_exists, mock_dependents, mock_call
+    ):
+        from portacode.connection.handlers.proxmox_infra import PROVISIONING_CACHE_ID
+        import json
+
+        mock_exists.return_value = True
+        mock_dependents.return_value = set()
+        mock_call.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        with TemporaryDirectory() as root, patch(
+            "portacode.connection.handlers.proxmox_infra.PROVISIONING_TEMPLATES_PATH",
+            self._registry_path(root),
+        ):
+            records = [
+                {"vmid": 900, "node": "pve", "lineage": "lineage", "cache_id": "old", "status": "stale"},
+                {"vmid": 901, "node": "pve", "lineage": "lineage", "cache_id": PROVISIONING_CACHE_ID, "status": "ready"},
+            ]
+            self._registry_path(root).write_text(json.dumps({"templates": records}))
+
+            removed = _garbage_collect_stale_native_templates(MagicMock(), "pve")
+            saved = json.loads(self._registry_path(root).read_text())["templates"]
+
+        self.assertEqual(removed, [900])
+        self.assertEqual([record["vmid"] for record in saved], [901])
+        mock_call.assert_called_once_with(
+            ["pct", "destroy", "900", "--purge", "1"], check=False
+        )
+
+    @patch("portacode.connection.handlers.proxmox_infra._call_subprocess")
+    @patch("portacode.connection.handlers.proxmox_infra._native_template_dependents")
+    @patch("portacode.connection.handlers.proxmox_infra._proxmox_template_exists")
+    def test_stale_template_without_replacement_is_never_deleted(
+        self, mock_exists, mock_dependents, mock_call
+    ):
+        import json
+
+        mock_exists.return_value = True
+        with TemporaryDirectory() as root, patch(
+            "portacode.connection.handlers.proxmox_infra.PROVISIONING_TEMPLATES_PATH",
+            self._registry_path(root),
+        ):
+            records = [
+                {"vmid": 900, "node": "pve", "lineage": "lineage", "cache_id": "old", "status": "stale"}
+            ]
+            self._registry_path(root).write_text(json.dumps({"templates": records}))
+
+            self.assertEqual(
+                _garbage_collect_stale_native_templates(MagicMock(), "pve"), []
             )
 
-            self.assertTrue(destination.is_file())
+        mock_dependents.assert_not_called()
+        mock_call.assert_not_called()
+
+    @patch("portacode.connection.handlers.proxmox_infra._call_subprocess")
+    @patch("portacode.connection.handlers.proxmox_infra._native_template_dependents")
+    @patch("portacode.connection.handlers.proxmox_infra._proxmox_template_exists")
+    def test_dependency_inspection_failure_fails_closed(
+        self, mock_exists, mock_dependents, mock_call
+    ):
+        from portacode.connection.handlers.proxmox_infra import PROVISIONING_CACHE_ID
+        import json
+
+        mock_exists.return_value = True
+        mock_dependents.return_value = None
+        with TemporaryDirectory() as root, patch(
+            "portacode.connection.handlers.proxmox_infra.PROVISIONING_TEMPLATES_PATH",
+            self._registry_path(root),
+        ):
+            records = [
+                {"vmid": 900, "node": "pve", "lineage": "lineage", "cache_id": "old", "status": "stale"},
+                {"vmid": 901, "node": "pve", "lineage": "lineage", "cache_id": PROVISIONING_CACHE_ID, "status": "ready"},
+            ]
+            self._registry_path(root).write_text(json.dumps({"templates": records}))
+
+            self.assertEqual(
+                _garbage_collect_stale_native_templates(MagicMock(), "pve"), []
+            )
+
+        mock_call.assert_not_called()
+
+    @patch("portacode.connection.handlers.proxmox_infra._call_subprocess")
+    @patch("portacode.connection.handlers.proxmox_infra._native_template_dependents")
+    @patch("portacode.connection.handlers.proxmox_infra._proxmox_template_exists")
+    def test_proxmox_destroy_refusal_retains_stale_template_record(
+        self, mock_exists, mock_dependents, mock_call
+    ):
+        from portacode.connection.handlers.proxmox_infra import PROVISIONING_CACHE_ID
+        import json
+
+        mock_exists.return_value = True
+        mock_dependents.return_value = set()
+        mock_call.return_value = MagicMock(
+            returncode=255, stdout="", stderr="linked clone exists"
+        )
+        with TemporaryDirectory() as root, patch(
+            "portacode.connection.handlers.proxmox_infra.PROVISIONING_TEMPLATES_PATH",
+            self._registry_path(root),
+        ):
+            records = [
+                {"vmid": 900, "node": "pve", "lineage": "lineage", "cache_id": "old", "status": "stale"},
+                {"vmid": 901, "node": "pve", "lineage": "lineage", "cache_id": PROVISIONING_CACHE_ID, "status": "ready"},
+            ]
+            self._registry_path(root).write_text(json.dumps({"templates": records}))
+
+            self.assertEqual(
+                _garbage_collect_stale_native_templates(MagicMock(), "pve"), []
+            )
+            saved = json.loads(self._registry_path(root).read_text())["templates"]
+
+        stale = next(record for record in saved if record["vmid"] == 900)
+        self.assertIn("linked clone exists", stale["cleanup_error"])
+
+    def test_registry_recovery_adopts_only_exact_owned_templates(self):
+        import json
+
+        proxmox = MagicMock()
+        proxmox.nodes.return_value.lxc.get.return_value = [
+            {"vmid": 900}, {"vmid": 901}, {"vmid": 902}
+        ]
+        configs = {
+            "900": {"template": 1, "description": "portacode-cache:true;cache_id=current;cache_source=hash;storage=local-lvm;disk_gib=8"},
+            "901": {"template": 1, "description": "note=portacode-cache:true-ish;cache_source=hash;storage=local-lvm;disk_gib=8"},
+            "902": {"template": 0, "description": "portacode-cache:true;cache_source=hash;storage=local-lvm;disk_gib=8"},
+        }
+        proxmox.nodes.return_value.lxc.side_effect = lambda vmid=None: MagicMock(
+            config=MagicMock(get=MagicMock(return_value=configs[str(vmid)]))
+        )
+        with TemporaryDirectory() as root, patch(
+            "portacode.connection.handlers.proxmox_infra.PROVISIONING_TEMPLATES_PATH",
+            self._registry_path(root),
+        ), patch(
+            "portacode.connection.handlers.proxmox_infra._cache_source_hash",
+            return_value="hash",
+        ):
+            records = _reconcile_native_template_registry(
+                proxmox, "pve", ["local:vztmpl/ubuntu.tar.zst"]
+            )
+            saved = json.loads(self._registry_path(root).read_text())["templates"]
+
+        self.assertEqual([record["vmid"] for record in records], [900])
+        self.assertEqual([record["vmid"] for record in saved], [900])
+
+    def test_registry_migrates_disk_specific_lineage_and_marks_old_generation_stale(self):
+        from portacode.connection.handlers.proxmox_infra import _cache_lineage_key
+        import json
+
+        source = "local:vztmpl/ubuntu.tar.zst"
+        proxmox = MagicMock()
+        proxmox.nodes.return_value.lxc.get.side_effect = RuntimeError("offline")
+        with TemporaryDirectory() as root, patch(
+            "portacode.connection.handlers.proxmox_infra.PROVISIONING_TEMPLATES_PATH",
+            self._registry_path(root),
+        ):
+            self._registry_path(root).write_text(json.dumps({"templates": [{
+                "vmid": 900,
+                "node": "pve",
+                "source_template": source,
+                "storage": "local-lvm",
+                "disk_gib": 7,
+                "lineage": "old-source:local-lvm:7",
+                "cache_id": "2026-08-07.5",
+                "status": "ready",
+            }]}))
+
+            _reconcile_native_template_registry(proxmox, "pve", [source])
+            saved = json.loads(self._registry_path(root).read_text())["templates"][0]
+
+        self.assertEqual(saved["lineage"], _cache_lineage_key(source, "local-lvm"))
+        self.assertEqual(saved["status"], "stale")
 
     def test_dynamic_steps_keep_identity_and_refresh_cli_out_of_cache(self):
         steps = _dynamic_bootstrap_steps("alice", "secret", "ssh-ed25519 AAA")

@@ -500,6 +500,14 @@ class TerminalManager:
                 pass
         self._system_info_task = asyncio.create_task(self._periodic_system_info())
 
+        # Cache migration and native-template retirement must not depend on a
+        # dashboard client requesting system_info. Run it off the event loop so
+        # reconnecting the node stays responsive while Proxmox is inspected.
+        from .handlers.proxmox_infra import maintain_provisioning_templates_on_startup
+        asyncio.create_task(
+            asyncio.to_thread(maintain_provisioning_templates_on_startup)
+        )
+
         # Start exposed-services file monitor for realtime updates.
         if getattr(self, "_exposed_services_task", None):
             try:

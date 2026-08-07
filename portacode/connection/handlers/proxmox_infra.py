@@ -44,6 +44,18 @@ DEVICE_ID_MARKER = "device_id="
 PROVISIONING_ID_MARKER = "provisioning_id="
 PROVISIONING_CACHE_PREFIX = "portacode-ready"
 PROVISIONING_CACHE_LOCK = threading.Lock()
+PROVISIONING_TEMPLATES_PATH = CONFIG_DIR / "provisioning_templates.json"
+PORTACODE_CACHE_MARKER = "portacode-cache:true"
+CACHE_ID_MARKER = "cache_id="
+CACHE_SOURCE_MARKER = "cache_source="
+CACHE_PARENT_MARKER = "cache_parent="
+_PROVISIONING_MAINTENANCE_LAST_RUN = 0.0
+PROVISIONING_MAINTENANCE_INTERVAL_S = 300
+# Keep reusable roots small while leaving enough room for the OS, Portacode,
+# Codex, and (on apt systems) Playwright Chromium to be installed. A request
+# below this size still builds at its requested size; if the software cannot
+# fit, provisioning fails rather than silently giving the user a larger disk.
+PROVISIONING_TEMPLATE_BASE_DISK_GIB = 4
 
 
 def _sanitize_description_value(value: Any) -> str:
@@ -1403,6 +1415,15 @@ def _build_full_container_summary(records: List[Dict[str, Any]], config: Dict[st
                 logger.debug("Failed to load %s config for %s: %s", kind, vmid_str, exc)
                 cfg = {}
 
+            if kind == "lxc" and (
+                _parse_onboot_flag(cfg.get("template"))
+                or PORTACODE_CACHE_MARKER in str(cfg.get("description") or "")
+            ):
+                # Cache template VMIDs are infrastructure, never user-managed
+                # containers. Their logical disk is still reserved capacity.
+                allocated_disk += _pick_container_disk_gib(kind, cfg, entry)
+                continue
+
             record = record_map.get(vmid_str)
             description = cfg.get("description") or ""
             managed = bool(record) or MANAGED_MARKER in description
@@ -1682,31 +1703,470 @@ def _pinned_portacode_install_command() -> str:
     return f"{PORTACODE_VENV_DIR}/bin/python -m pip install --upgrade {requirement}"
 
 
-def _provisioning_cache_filename(source_template: str) -> str:
-    """Return a stable, storage-safe name tied to source and cache schema."""
-    source_name = _template_filename_from_volid(source_template)
-    readable = re.sub(r"[^a-z0-9]+", "-", source_name.lower()).strip("-")[:52]
-    digest = hashlib.sha256(source_template.encode("utf-8")).hexdigest()[:12]
-    cache_id = re.sub(r"[^a-zA-Z0-9._-]+", "-", PROVISIONING_CACHE_ID)
-    return f"{PROVISIONING_CACHE_PREFIX}-{readable}-{digest}-{cache_id}.tar.zst"
+def _cache_source_hash(source_template: str) -> str:
+    return hashlib.sha256(source_template.encode("utf-8")).hexdigest()[:16]
 
 
-def _provisioning_cache_volid(source_template: str) -> str:
-    storage = str(source_template).split(":", 1)[0]
-    return f"{storage}:vztmpl/{_provisioning_cache_filename(source_template)}"
+def _cache_lineage_key(source_template: str, storage: str) -> str:
+    return f"{_cache_source_hash(source_template)}:{storage}"
 
 
-def _pvesm_path(volid: str) -> Optional[Path]:
-    result = _call_subprocess(["pvesm", "path", volid], check=False)
-    if result.returncode != 0 or not (result.stdout or "").strip():
+def _load_provisioning_templates() -> List[Dict[str, Any]]:
+    try:
+        payload = json.loads(PROVISIONING_TEMPLATES_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except Exception as exc:
+        logger.warning("Unable to read provisioning template registry: %s", exc)
+        return []
+    records = payload.get("templates") if isinstance(payload, dict) else None
+    return [dict(entry) for entry in (records or []) if isinstance(entry, dict)]
+
+
+def _save_provisioning_templates(records: List[Dict[str, Any]]) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    tmp_path = PROVISIONING_TEMPLATES_PATH.with_suffix(".tmp")
+    tmp_path.write_text(
+        json.dumps({"templates": records, "updated_at": _current_time_iso()}, indent=2),
+        encoding="utf-8",
+    )
+    os.replace(tmp_path, PROVISIONING_TEMPLATES_PATH)
+    os.chmod(PROVISIONING_TEMPLATES_PATH, 0o600)
+
+
+def _cache_template_description(source_template: str, storage: str, disk_gib: int) -> str:
+    return ";".join(
+        [
+            PORTACODE_CACHE_MARKER,
+            f"{CACHE_ID_MARKER}{_sanitize_description_value(PROVISIONING_CACHE_ID)}",
+            f"{CACHE_SOURCE_MARKER}{_cache_source_hash(source_template)}",
+            f"storage={_sanitize_description_value(storage)}",
+            f"disk_gib={int(disk_gib)}",
+        ]
+    )
+
+
+def _register_native_template(
+    *, vmid: int, source_template: str, storage: str, disk_gib: int, node: str
+) -> Dict[str, Any]:
+    lineage = _cache_lineage_key(source_template, storage)
+    records = _load_provisioning_templates()
+    for record in records:
+        if (
+            record.get("node") == node
+            and record.get("lineage") == lineage
+            and int(record.get("vmid") or -1) != int(vmid)
+        ):
+            record["status"] = "stale"
+    record = {
+        "vmid": int(vmid),
+        "node": node,
+        "source_template": source_template,
+        "source_hash": _cache_source_hash(source_template),
+        "storage": storage,
+        "disk_gib": int(disk_gib),
+        "lineage": lineage,
+        "cache_id": PROVISIONING_CACHE_ID,
+        "portacode_version": _running_portacode_version(),
+        "status": "ready",
+        "created_at": _current_time_iso(),
+    }
+    records = [entry for entry in records if int(entry.get("vmid") or -1) != int(vmid)]
+    records.append(record)
+    _save_provisioning_templates(records)
+    return record
+
+
+def _proxmox_template_exists(proxmox: Any, node: str, vmid: int) -> bool:
+    try:
+        config = proxmox.nodes(node).lxc(str(int(vmid))).config.get()
+    except Exception:
+        return False
+    return _parse_onboot_flag((config or {}).get("template"))
+
+
+def _find_native_template(
+    proxmox: Any, node: str, source_template: str, storage: str, requested_disk_gib: int
+) -> Optional[Dict[str, Any]]:
+    lineage = _cache_lineage_key(source_template, storage)
+    candidates = [
+        record
+        for record in _load_provisioning_templates()
+        if record.get("lineage") == lineage
+        and record.get("node") == node
+        and record.get("cache_id") == PROVISIONING_CACHE_ID
+        and record.get("status") == "ready"
+        and int(record.get("disk_gib") or 0) > 0
+        and int(record.get("disk_gib") or 0) <= int(requested_disk_gib)
+    ]
+    candidates.sort(key=lambda entry: str(entry.get("created_at") or ""), reverse=True)
+    for record in candidates:
+        try:
+            vmid = int(record["vmid"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if _proxmox_template_exists(proxmox, node, vmid):
+            return record
+    return None
+
+
+def _convert_container_to_template(
+    proxmox: Any,
+    node: str,
+    vmid: int,
+    *,
+    source_template: str,
+    storage: str,
+    disk_gib: int,
+) -> Dict[str, Any]:
+    _sanitize_container_for_cache(vmid)
+    _stop_container(proxmox, node, vmid)
+    description = _cache_template_description(source_template, storage, disk_gib)
+    proxmox.nodes(node).lxc(str(vmid)).config.put(description=description, onboot=0)
+    result = _call_subprocess(["pct", "template", str(vmid)], check=False)
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Failed to convert provisioning builder into a native template: "
+            + _command_failure_details(["pct", "template", str(vmid)], result)
+        )
+    record = _register_native_template(
+        vmid=vmid,
+        source_template=source_template,
+        storage=storage,
+        disk_gib=disk_gib,
+        node=node,
+    )
+    _garbage_collect_stale_native_templates(proxmox, node)
+    return record
+
+
+def _clone_native_template(
+    proxmox: Any, node: str, template_vmid: int, new_vmid: int, payload: Dict[str, Any]
+) -> Tuple[Dict[str, Any], float]:
+    started = time.time()
+    upid = proxmox.nodes(node).lxc(str(int(template_vmid))).clone.post(
+        newid=int(new_vmid),
+        hostname=payload["hostname"],
+        full=0,
+    )
+    status, _elapsed = _wait_for_task(
+        proxmox, node, upid, timeout_s=PROXMOX_TASK_WAIT_TIMEOUT_S
+    )
+    exitstatus = str((status or {}).get("exitstatus") or "OK").upper()
+    if exitstatus != "OK":
+        raise RuntimeError(f"Linked clone task failed ({exitstatus}): {status}")
+    base_disk_gib = int(payload.get("cache_template_disk_gib") or 0)
+    requested_disk_gib = int(payload["disk_gib"])
+    if base_disk_gib <= 0:
+        raise RuntimeError("Native provisioning template has no valid base disk size")
+    if requested_disk_gib < base_disk_gib:
+        raise RuntimeError(
+            f"Requested disk ({requested_disk_gib} GiB) is smaller than the "
+            f"native template ({base_disk_gib} GiB)"
+        )
+    if requested_disk_gib > base_disk_gib:
+        resize_upid = proxmox.nodes(node).lxc(str(int(new_vmid))).resize.put(
+            disk="rootfs", size=f"{requested_disk_gib}G"
+        )
+        if resize_upid:
+            resize_status, _resize_elapsed = _wait_for_task(
+                proxmox,
+                node,
+                resize_upid,
+                timeout_s=PROXMOX_TASK_WAIT_TIMEOUT_S,
+            )
+            resize_exit = str((resize_status or {}).get("exitstatus") or "OK").upper()
+            if resize_exit != "OK":
+                raise RuntimeError(
+                    f"Linked clone disk resize failed ({resize_exit}): {resize_status}"
+                )
+    description = _build_managed_description(
+        payload.get("description"),
+        device_id=str(payload.get("device_id") or "") or None,
+        provisioning_id=str(payload.get("provisioning_id") or "") or None,
+    )
+    description = f"{description};{CACHE_PARENT_MARKER}{int(template_vmid)}"
+    proxmox.nodes(node).lxc(str(int(new_vmid))).config.put(
+        memory=int(payload["ram_mib"]),
+        swap=int(payload.get("swap_mb", 0)),
+        cores=max(int(payload.get("cores", 1)), 1),
+        cpulimit=float(payload.get("cpulimit", payload.get("cpus", 1))),
+        net0=payload["net0"],
+        description=description,
+        onboot=0,
+    )
+    return status, time.time() - started
+
+
+def _reassign_reservation_ctid(reservation_id: str, old_vmid: int, proxmox: Any) -> int:
+    with _acquire_state_lock("reassign template builder reservation"):
+        pending = _MANAGED_CONTAINERS_STATE.get("pending", {}).get(reservation_id)
+        if not pending:
+            raise RuntimeError("Provisioning reservation disappeared while creating template")
+        if int(pending.get("ctid") or 0) != int(old_vmid):
+            raise RuntimeError("Provisioning reservation CTID changed unexpectedly")
+        pending["ctid"] = None
+    return _claim_ctid_for_reservation(reservation_id, proxmox)
+
+
+def _legacy_cache_archive_matches(volid: str) -> bool:
+    filename = _template_filename_from_volid(volid)
+    return bool(
+        re.fullmatch(
+            rf"{re.escape(PROVISIONING_CACHE_PREFIX)}-.+-[0-9a-f]{{12}}-[A-Za-z0-9._-]+\.tar\.zst",
+            filename,
+        )
+    )
+
+
+def _remove_legacy_cache_archives(
+    proxmox: Any, node: str, storages: Iterable[Dict[str, Any]]
+) -> List[str]:
+    removed: List[str] = []
+    for volid in _list_all_vztmpl_volids(proxmox, node, storages):
+        if not _legacy_cache_archive_matches(volid):
+            continue
+        result = _call_subprocess(["pvesm", "free", volid], check=False)
+        if result.returncode == 0:
+            removed.append(volid)
+            logger.info("Removed legacy Portacode provisioning archive %s", volid)
+        else:
+            logger.warning(
+                "Unable to remove legacy Portacode provisioning archive %s: %s",
+                volid,
+                _command_failure_details(["pvesm", "free", volid], result),
+            )
+    return removed
+
+
+def _list_all_vztmpl_volids(
+    proxmox: Any, node: str, storages: Iterable[Dict[str, Any]]
+) -> List[str]:
+    volids: List[str] = []
+    for storage in storages:
+        storage_name = storage.get("storage")
+        if not storage_name:
+            continue
+        try:
+            items = proxmox.nodes(node).storage(storage_name).content.get()
+        except Exception:
+            continue
+        for item in items or []:
+            if item.get("content") == "vztmpl" and item.get("volid"):
+                volids.append(str(item["volid"]))
+    return volids
+
+
+def _native_template_dependents(
+    proxmox: Any, node: str, template_vmid: int
+) -> Optional[Set[int]]:
+    dependents: Set[int] = set()
+    for record in _load_managed_container_records():
+        try:
+            if (
+                record.get("node") == node
+                and int(record.get("cache_template_vmid") or -1) == int(template_vmid)
+            ):
+                dependents.add(int(record["vmid"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    try:
+        containers = proxmox.nodes(node).lxc.get()
+        for entry in containers or []:
+            vmid = int(entry.get("vmid"))
+            if vmid == int(template_vmid):
+                continue
+            config = proxmox.nodes(node).lxc(str(vmid)).config.get()
+            parent = _extract_marker_value(
+                str((config or {}).get("description") or ""), CACHE_PARENT_MARKER
+            )
+            if parent and int(parent) == int(template_vmid):
+                dependents.add(vmid)
+    except Exception as exc:
+        logger.warning(
+            "Unable to verify dependents for provisioning template %s; retaining it: %s",
+            template_vmid,
+            exc,
+        )
         return None
-    return Path(result.stdout.strip())
+    return dependents
 
 
-def _find_provisioning_cache(source_template: str) -> Optional[str]:
-    volid = _provisioning_cache_volid(source_template)
-    path = _pvesm_path(volid)
-    return volid if path and path.is_file() else None
+def _reconcile_native_template_registry(
+    proxmox: Any, node: str, source_templates: Iterable[str]
+) -> List[Dict[str, Any]]:
+    records = _load_provisioning_templates()
+    changed = False
+    for record in records:
+        source_template = record.get("source_template")
+        storage = record.get("storage")
+        if not source_template or not storage:
+            continue
+        normalized_lineage = _cache_lineage_key(str(source_template), str(storage))
+        if record.get("lineage") != normalized_lineage:
+            record["lineage"] = normalized_lineage
+            changed = True
+        if (
+            record.get("cache_id") != PROVISIONING_CACHE_ID
+            and record.get("status") == "ready"
+        ):
+            record["status"] = "stale"
+            changed = True
+    known_vmids = {int(record.get("vmid") or -1) for record in records}
+    sources_by_hash = {
+        _cache_source_hash(source): source for source in source_templates if source
+    }
+    if changed:
+        _save_provisioning_templates(records)
+    try:
+        entries = proxmox.nodes(node).lxc.get()
+    except Exception as exc:
+        logger.warning("Unable to discover native provisioning templates: %s", exc)
+        return records
+    for entry in entries or []:
+        try:
+            vmid = int(entry.get("vmid"))
+        except (TypeError, ValueError):
+            continue
+        if vmid in known_vmids:
+            continue
+        try:
+            config = proxmox.nodes(node).lxc(str(vmid)).config.get() or {}
+        except Exception:
+            continue
+        description = str(config.get("description") or "")
+        description_markers = {
+            marker.strip() for marker in description.split(";") if marker.strip()
+        }
+        if (
+            not _parse_onboot_flag(config.get("template"))
+            or PORTACODE_CACHE_MARKER not in description_markers
+        ):
+            continue
+        source_hash = _extract_marker_value(description, CACHE_SOURCE_MARKER) or ""
+        source_template = sources_by_hash.get(source_hash)
+        storage = _extract_marker_value(description, "storage=") or ""
+        try:
+            disk_gib = int(_extract_marker_value(description, "disk_gib=") or 0)
+        except ValueError:
+            disk_gib = 0
+        cache_id = _extract_marker_value(description, CACHE_ID_MARKER) or "unknown"
+        record: Dict[str, Any] = {
+            "vmid": vmid,
+            "node": node,
+            "source_template": source_template,
+            "source_hash": source_hash,
+            "storage": storage,
+            "disk_gib": disk_gib,
+            "cache_id": cache_id,
+            "status": "ready" if source_template and storage and disk_gib else "orphaned",
+            "discovered_at": _current_time_iso(),
+        }
+        if source_template and storage and disk_gib:
+            record["lineage"] = _cache_lineage_key(source_template, storage)
+        records.append(record)
+        known_vmids.add(vmid)
+        changed = True
+    if changed:
+        _save_provisioning_templates(records)
+    return records
+
+
+def _garbage_collect_stale_native_templates(proxmox: Any, node: str) -> List[int]:
+    records = _load_provisioning_templates()
+    registry_changed = False
+    current_lineages = {
+        str(record.get("lineage"))
+        for record in records
+        if record.get("node") == node
+        and record.get("cache_id") == PROVISIONING_CACHE_ID
+        and record.get("status") == "ready"
+        and _proxmox_template_exists(proxmox, node, int(record.get("vmid") or -1))
+    }
+    removed: List[int] = []
+    kept: List[Dict[str, Any]] = []
+    for record in records:
+        if record.get("node") != node:
+            kept.append(record)
+            continue
+        try:
+            vmid = int(record.get("vmid"))
+        except (TypeError, ValueError):
+            continue
+        if not _proxmox_template_exists(proxmox, node, vmid):
+            continue
+        is_stale = record.get("cache_id") != PROVISIONING_CACHE_ID or record.get("status") == "stale"
+        has_replacement = str(record.get("lineage")) in current_lineages
+        if not is_stale or not has_replacement:
+            kept.append(record)
+            continue
+        dependents = _native_template_dependents(proxmox, node, vmid)
+        if dependents is None or dependents:
+            dependent_vmids = sorted(dependents or [])
+            if (
+                record.get("status") != "stale"
+                or record.get("dependent_vmids") != dependent_vmids
+            ):
+                registry_changed = True
+            record["status"] = "stale"
+            record["dependent_vmids"] = dependent_vmids
+            kept.append(record)
+            continue
+        result = _call_subprocess(["pct", "destroy", str(vmid), "--purge", "1"], check=False)
+        if result.returncode != 0:
+            registry_changed = True
+            record["status"] = "stale"
+            record["cleanup_error"] = _clip_command_output(result.stderr or result.stdout, 1200)
+            kept.append(record)
+            logger.warning("Proxmox refused stale template deletion vmid=%s", vmid)
+            continue
+        removed.append(vmid)
+        registry_changed = True
+        logger.info("Deleted stale provisioning template vmid=%s", vmid)
+    if registry_changed or kept != records:
+        _save_provisioning_templates(kept)
+    return removed
+
+
+def _maintain_provisioning_templates(config: Dict[str, Any], *, force: bool = False) -> Dict[str, Any]:
+    global _PROVISIONING_MAINTENANCE_LAST_RUN
+    now = time.monotonic()
+    if not force and now - _PROVISIONING_MAINTENANCE_LAST_RUN < PROVISIONING_MAINTENANCE_INTERVAL_S:
+        return {"templates": _load_provisioning_templates(), "deferred": True}
+    if not PROVISIONING_CACHE_LOCK.acquire(blocking=False):
+        return {"templates": _load_provisioning_templates(), "deferred": True}
+    try:
+        proxmox = _connect_proxmox(config)
+        node = _get_node_from_config(config)
+        storages = proxmox.nodes(node).storage.get()
+        legacy_removed = _remove_legacy_cache_archives(proxmox, node, storages)
+        source_templates = _list_templates(proxmox, node, storages)
+        _reconcile_native_template_registry(proxmox, node, source_templates)
+        templates_removed = _garbage_collect_stale_native_templates(proxmox, node)
+        _PROVISIONING_MAINTENANCE_LAST_RUN = now
+        return {
+            "cache_id": PROVISIONING_CACHE_ID,
+            "templates": _load_provisioning_templates(),
+            "legacy_archives_removed": legacy_removed,
+            "templates_removed": templates_removed,
+        }
+    except Exception as exc:
+        logger.warning("Provisioning template maintenance failed safely: %s", exc)
+        return {"templates": _load_provisioning_templates(), "error": str(exc)}
+    finally:
+        PROVISIONING_CACHE_LOCK.release()
+
+
+def maintain_provisioning_templates_on_startup() -> Dict[str, Any]:
+    """Run ownership-scoped cache maintenance once the connection is alive.
+
+    This is intentionally called by connection startup rather than at import
+    time, and the maintenance lock/interval make repeated reconnects harmless.
+    """
+    config = _load_config()
+    if not config:
+        return {"templates": [], "configured": False}
+    return _maintain_provisioning_templates(config)
 
 
 def _cacheable_bootstrap_steps(package_manager: str) -> List[Dict[str, Any]]:
@@ -1809,51 +2269,6 @@ def _sanitize_container_for_cache(vmid: int) -> None:
         "if command -v apt-get >/dev/null 2>&1; then apt-get clean; rm -rf /var/lib/apt/lists/*; fi"
     )
     _run_pct_check(vmid, command)
-
-
-def _save_provisioning_cache(proxmox: Any, node: str, vmid: int, source_template: str) -> str:
-    """Stop and archive a sanitized container, then restart it for this request."""
-    volid = _provisioning_cache_volid(source_template)
-    destination = _pvesm_path(volid)
-    if destination is None:
-        source_path = _pvesm_path(source_template)
-        if source_path is None:
-            raise RuntimeError(f"Unable to resolve template storage path for {source_template}")
-        destination = source_path.parent / _provisioning_cache_filename(source_template)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    _sanitize_container_for_cache(vmid)
-    _stop_container(proxmox, node, vmid)
-    try:
-        with tempfile.TemporaryDirectory(
-            prefix=".portacode-vzdump-", dir=str(destination.parent)
-        ) as dump_dir:
-            # vzdump enters its temporary root through lxc-usernsexec for
-            # unprivileged containers (mapped UID 100000+). TemporaryDirectory
-            # defaults to 0700, which prevents that mapped process from
-            # traversing the staging directory.
-            os.chmod(dump_dir, 0o755)
-            result = _call_subprocess([
-                "vzdump", str(vmid), "--dumpdir", dump_dir, "--mode", "stop", "--compress", "zstd",
-            ], check=False)
-            if result.returncode != 0:
-                raise RuntimeError(f"Failed to save provisioning cache: {_command_failure_details(['vzdump', str(vmid)], result)}")
-            archives = list(Path(dump_dir).glob("*.tar.zst"))
-            if len(archives) != 1:
-                raise RuntimeError("vzdump did not produce exactly one LXC archive")
-            os.replace(archives[0], destination)
-            cache_id = re.sub(r"[^a-zA-Z0-9._-]+", "-", PROVISIONING_CACHE_ID)
-            family_prefix = destination.name.rsplit(f"-{cache_id}.tar.zst", 1)[0]
-            for stale in destination.parent.glob(f"{family_prefix}-*.tar.zst"):
-                if stale != destination:
-                    # Cache archives never contain user data; old schema generations
-                    # are safe to prune and otherwise consume substantial disk.
-                    try:
-                        stale.unlink()
-                    except OSError:
-                        logger.warning("Unable to prune stale provisioning cache %s", stale)
-    finally:
-        _start_container(proxmox, node, vmid)
-    return volid
 
 
 _NETWORK_WAIT_CMD = (
@@ -3018,6 +3433,7 @@ def build_snapshot(config: Dict[str, Any]) -> Dict[str, Any]:
     if not config:
         return {"configured": False, "network": base_network}
     _ensure_templates_refreshed_on_startup(config)
+    provisioning_templates = _maintain_provisioning_templates(config)
     return {
         "configured": True,
         "host": config.get("host"),
@@ -3028,6 +3444,7 @@ def build_snapshot(config: Dict[str, Any]) -> Dict[str, Any]:
         "default_storage": config.get("default_storage"),
         "templates": config.get("templates") or [],
         "template_downloads": config.get("template_downloads") or {},
+        "provisioning_templates": provisioning_templates,
         "last_verified": config.get("last_verified"),
         "network": base_network,
     }
@@ -3354,10 +3771,11 @@ class CreateProxmoxContainerHandler(SyncHandler):
         template_candidates = config_guess.get("templates") or []
         template_hint = (message.get("template") or (template_candidates[0] if template_candidates else "")).strip()
         package_manager = _guess_package_manager_from_template(template_hint)
-        cached_template = _find_provisioning_cache(template_hint) if template_hint else None
+        native_template: Optional[Dict[str, Any]] = None
         project_paths = _sanitize_project_paths(message.get("project_paths"))
         bootstrap_user, bootstrap_password, bootstrap_ssh_key = _get_provisioning_user_info(message)
-        cache_steps = [] if cached_template else _cacheable_bootstrap_steps(package_manager)
+        all_cache_steps = _cacheable_bootstrap_steps(package_manager)
+        cache_steps = list(all_cache_steps)
         bootstrap_steps = _dynamic_bootstrap_steps(
             bootstrap_user, bootstrap_password, bootstrap_ssh_key
         )
@@ -3504,16 +3922,26 @@ class CreateProxmoxContainerHandler(SyncHandler):
             # after the cache-safe machine layer has been restored or archived.
             payload["defer_credentials"] = True
             source_template = payload["template"]
-            if cached_template:
+            lookup_proxmox = _connect_proxmox(config)
+            native_template = _find_native_template(
+                lookup_proxmox,
+                node,
+                source_template,
+                payload["storage"],
+                int(payload["disk_gib"]),
+            )
+            if native_template:
                 logger.info(
-                    "Using provisioning cache %s for source template %s (schema=%s)",
-                    cached_template,
+                    "Using native provisioning template vmid=%s for source=%s schema=%s",
+                    native_template.get("vmid"),
                     source_template,
                     PROVISIONING_CACHE_ID,
                 )
-                payload["template"] = cached_template
                 payload["provisioning_cache_hit"] = True
                 payload["source_template"] = source_template
+                payload["cache_template_vmid"] = int(native_template["vmid"])
+                payload["cache_template_disk_gib"] = int(native_template["disk_gib"])
+                cache_steps = []
             payload["cpulimit"] = float(payload["cpus"])
             payload["cores"] = int(max(math.ceil(payload["cpus"]), 1))
             payload["memory"] = int(payload["ram_mib"])
@@ -3534,6 +3962,8 @@ class CreateProxmoxContainerHandler(SyncHandler):
                 device_id=device_id,
                 provisioning_id=provisioning_id,
             )
+            payload["device_id"] = device_id
+            payload["provisioning_id"] = provisioning_id
         except Exception as exc:
             # Ensure early provisioning failures still emit a terminal event that the
             # dashboard and gateway can use to finalize state and cleanup the device row.
@@ -3552,11 +3982,34 @@ class CreateProxmoxContainerHandler(SyncHandler):
             raise
 
         def _provision_background() -> None:
-            nonlocal current_step_index
+            nonlocal current_step_index, native_template, cache_steps
             proxmox: Any = None
             vmid: Optional[int] = None
             created_record = False
+            build_lock_held = False
             try:
+                if native_template is None:
+                    PROVISIONING_CACHE_LOCK.acquire()
+                    build_lock_held = True
+                    proxmox = _connect_proxmox(config)
+                    native_template = _find_native_template(
+                        proxmox,
+                        node,
+                        source_template,
+                        payload["storage"],
+                        int(payload["disk_gib"]),
+                    )
+                    if native_template:
+                        payload["provisioning_cache_hit"] = True
+                        payload["source_template"] = source_template
+                        payload["cache_template_vmid"] = int(native_template["vmid"])
+                        payload["cache_template_disk_gib"] = int(
+                            native_template["disk_gib"]
+                        )
+                        cache_steps = []
+                        PROVISIONING_CACHE_LOCK.release()
+                        build_lock_held = False
+
                 def _create_container():
                     nonlocal proxmox, vmid, created_record
                     proxmox = _connect_proxmox(config)
@@ -3613,10 +4066,31 @@ class CreateProxmoxContainerHandler(SyncHandler):
                             details={"checkpoint": "before_submit_create", "vmid": vmid},
                             on_behalf_of_device=device_id,
                         )
-                        vmid, _ = _instantiate_container(proxmox, node, payload, vmid=vmid)
-                        if payload.get("source_template"):
-                            payload["restore_template"] = payload["template"]
-                            payload["template"] = payload["source_template"]
+                        if native_template:
+                            _clone_native_template(
+                                proxmox,
+                                node,
+                                int(native_template["vmid"]),
+                                vmid,
+                                payload,
+                            )
+                        else:
+                            builder_payload = dict(payload)
+                            builder_payload["disk_gib"] = min(
+                                int(payload["disk_gib"]),
+                                PROVISIONING_TEMPLATE_BASE_DISK_GIB,
+                            )
+                            builder_payload["hostname"] = (
+                                f"pcache-{_cache_source_hash(source_template)[:8]}-{PROVISIONING_CACHE_ID}"
+                            )[:63]
+                            builder_payload["description"] = _cache_template_description(
+                                source_template,
+                                payload["storage"],
+                                int(builder_payload["disk_gib"]),
+                            ) + f";{PROVISIONING_ID_MARKER}{provisioning_id}"
+                            vmid, _ = _instantiate_container(
+                                proxmox, node, builder_payload, vmid=vmid
+                            )
                         logger.info(
                             "create_proxmox_container: create task completed request_id=%s vmid=%s",
                             request_id,
@@ -3644,13 +4118,15 @@ class CreateProxmoxContainerHandler(SyncHandler):
                     payload["created_at"] = datetime.utcnow().isoformat() + "Z"
                     payload["status"] = "creating"
                     payload["device_id"] = device_id
-                    try:
-                        _write_container_record(vmid, payload, reservation_id=reservation_id)
-                        created_record = True
-                    except Exception:
-                        _release_container_reservation(reservation_id)
-                        _cleanup_failed_container(proxmox, node, vmid, provisioning_id)
-                        raise
+                    payload["provisioning_id"] = provisioning_id
+                    if native_template:
+                        try:
+                            _write_container_record(vmid, payload, reservation_id=reservation_id)
+                            created_record = True
+                        except Exception:
+                            _release_container_reservation(reservation_id)
+                            _cleanup_failed_container(proxmox, node, vmid, provisioning_id)
+                            raise
                     return proxmox, node, vmid, payload
 
                 proxmox, _, vmid, payload_local = _run_lifecycle_step(
@@ -3673,7 +4149,8 @@ class CreateProxmoxContainerHandler(SyncHandler):
                     "Container startup completed.",
                     _start_container_step,
                 )
-                _update_container_record(vmid, {"status": "running"})
+                if native_template:
+                    _update_container_record(vmid, {"status": "running"})
 
                 def _bootstrap_progress_callback(
                     step_index: int,
@@ -3741,11 +4218,47 @@ class CreateProxmoxContainerHandler(SyncHandler):
                             + _clip_command_output(str(command_output), 1200)
                         )
                     # No keypair or user-specific Codex state exists at this point.
-                    with PROVISIONING_CACHE_LOCK:
-                        _save_provisioning_cache(
-                            proxmox, node, vmid, payload_local.get("source_template") or source_template
-                        )
+                    template_record = _convert_container_to_template(
+                        proxmox,
+                        node,
+                        vmid,
+                        source_template=source_template,
+                        storage=payload_local["storage"],
+                        disk_gib=min(
+                            int(payload_local["disk_gib"]),
+                            PROVISIONING_TEMPLATE_BASE_DISK_GIB,
+                        ),
+                    )
+                    builder_vmid = vmid
+                    vmid = _reassign_reservation_ctid(
+                        reservation_id, builder_vmid, proxmox
+                    )
+                    payload_local["vmid"] = vmid
+                    payload_local["cache_template_vmid"] = int(template_record["vmid"])
+                    payload_local["cache_template_disk_gib"] = int(
+                        template_record["disk_gib"]
+                    )
+                    payload_local["provisioning_cache_hit"] = False
+                    _clone_native_template(
+                        proxmox,
+                        node,
+                        int(template_record["vmid"]),
+                        vmid,
+                        payload_local,
+                    )
+                    _write_container_record(
+                        vmid, payload_local, reservation_id=reservation_id
+                    )
+                    created_record = True
+                    _start_container(proxmox, node, vmid)
+                    _update_container_record(vmid, {"status": "running"})
+                    PROVISIONING_CACHE_LOCK.release()
+                    build_lock_held = False
                     current_step_index += len(cache_steps)
+                else:
+                    # The shared machine layer was restored as a linked clone.
+                    # Keep progress indices aligned without rerunning cached work.
+                    current_step_index += len(all_cache_steps)
 
                 public_key, steps = _bootstrap_portacode(
                     vmid,
@@ -3991,6 +4504,9 @@ class CreateProxmoxContainerHandler(SyncHandler):
                         },
                     },
                 )
+            finally:
+                if build_lock_held:
+                    PROVISIONING_CACHE_LOCK.release()
 
         threading.Thread(target=_provision_background, daemon=True).start()
 
@@ -4283,6 +4799,7 @@ class RemoveProxmoxContainerHandler(SyncHandler):
             if not _is_proxmox_missing_container_error(exc):
                 raise
             _remove_container_record(vmid)
+            _maintain_provisioning_templates(config, force=True)
             infra = get_infra_snapshot()
             return {
                 "event": "proxmox_container_action",
@@ -4303,6 +4820,7 @@ class RemoveProxmoxContainerHandler(SyncHandler):
         stop_status, stop_elapsed = _stop_container(proxmox, node, vmid)
         delete_status, delete_elapsed = _delete_container(proxmox, node, vmid)
         _remove_container_record(vmid)
+        _maintain_provisioning_templates(config, force=True)
 
         infra = get_infra_snapshot()
         return {
