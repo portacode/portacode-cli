@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import importlib.metadata as importlib_metadata
 import json
 import logging
 import math
@@ -26,6 +28,8 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set,
 
 import platformdirs
 
+from ...provisioning_cache import PROVISIONING_CACHE_ID
+
 from .base import SyncHandler
 
 logger = logging.getLogger(__name__)
@@ -38,6 +42,8 @@ CONTAINERS_DIR = CONFIG_DIR / "containers"
 MANAGED_MARKER = "portacode-managed:true"
 DEVICE_ID_MARKER = "device_id="
 PROVISIONING_ID_MARKER = "provisioning_id="
+PROVISIONING_CACHE_PREFIX = "portacode-ready"
+PROVISIONING_CACHE_LOCK = threading.Lock()
 
 
 def _sanitize_description_value(value: Any) -> str:
@@ -428,6 +434,9 @@ def _list_templates(client: Any, node: str, storages: Iterable[Dict[str, Any]]) 
             continue
         for item in items:
             if item.get("content") == "vztmpl" and item.get("volid"):
+                filename = _template_filename_from_volid(item["volid"])
+                if filename.startswith(f"{PROVISIONING_CACHE_PREFIX}-"):
+                    continue
                 templates.append(item["volid"])
     return templates
 
@@ -1652,6 +1661,199 @@ def _friendly_step_label(step_name: str) -> str:
         return "Step"
     normalized = step_name.replace("_", " ").strip()
     return normalized.capitalize()
+
+
+def _running_portacode_version() -> str:
+    """Version guests must install to match this node's provisioning protocol."""
+    try:
+        value = importlib_metadata.version("portacode")
+    except importlib_metadata.PackageNotFoundError:
+        from ..._version import __version__
+
+        value = __version__
+    value = str(value).strip()
+    if not value or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.!+_-]*", value):
+        raise RuntimeError(f"Cannot safely pin invalid Portacode version {value!r}")
+    return value
+
+
+def _pinned_portacode_install_command() -> str:
+    requirement = shlex.quote(f"portacode=={_running_portacode_version()}")
+    return f"{PORTACODE_VENV_DIR}/bin/python -m pip install --upgrade {requirement}"
+
+
+def _provisioning_cache_filename(source_template: str) -> str:
+    """Return a stable, storage-safe name tied to source and cache schema."""
+    source_name = _template_filename_from_volid(source_template)
+    readable = re.sub(r"[^a-z0-9]+", "-", source_name.lower()).strip("-")[:52]
+    digest = hashlib.sha256(source_template.encode("utf-8")).hexdigest()[:12]
+    cache_id = re.sub(r"[^a-zA-Z0-9._-]+", "-", PROVISIONING_CACHE_ID)
+    return f"{PROVISIONING_CACHE_PREFIX}-{readable}-{digest}-{cache_id}.tar.zst"
+
+
+def _provisioning_cache_volid(source_template: str) -> str:
+    storage = str(source_template).split(":", 1)[0]
+    return f"{storage}:vztmpl/{_provisioning_cache_filename(source_template)}"
+
+
+def _pvesm_path(volid: str) -> Optional[Path]:
+    result = _call_subprocess(["pvesm", "path", volid], check=False)
+    if result.returncode != 0 or not (result.stdout or "").strip():
+        return None
+    return Path(result.stdout.strip())
+
+
+def _find_provisioning_cache(source_template: str) -> Optional[str]:
+    volid = _provisioning_cache_volid(source_template)
+    path = _pvesm_path(volid)
+    return volid if path and path.is_file() else None
+
+
+def _cacheable_bootstrap_steps(package_manager: str) -> List[Dict[str, Any]]:
+    """Expensive steps that are safe to preserve without a device identity."""
+    profile = _PACKAGE_MANAGER_PROFILES.get(package_manager, _PACKAGE_MANAGER_PROFILES["apt"])
+    steps: List[Dict[str, Any]] = [{"name": "wait_for_network", "cmd": _NETWORK_WAIT_CMD, "retries": 0}]
+    if profile.get("update_cmd"):
+        steps.append({
+            "name": profile.get("update_step_name", "package_update"),
+            "cmd": profile["update_cmd"],
+            "retries": profile.get("update_retries", 3),
+            "retry_delay_s": 5,
+            "retry_on": _UPDATE_RETRY_ON,
+        })
+    if profile.get("install_cmd"):
+        steps.append({
+            "name": profile.get("install_step_name", "install_deps"),
+            "cmd": profile["install_cmd"],
+            "retries": profile.get("install_retries", 5),
+            "retry_delay_s": 5,
+            "retry_on": _INSTALL_RETRY_ON,
+        })
+    steps.extend([
+        {"name": "create_portacode_venv", "cmd": f"python3 -m venv --clear {PORTACODE_VENV_DIR}", "retries": 0},
+        {"name": "install_portacode", "cmd": _pinned_portacode_install_command(), "retries": 0},
+        {
+            "name": "ensure_global_portacode_cli",
+            "cmd": f"install -d -m 755 {os.path.dirname(PORTACODE_GLOBAL_CLI_PATH)} && ln -sfn {PORTACODE_VENV_DIR}/bin/portacode {PORTACODE_GLOBAL_CLI_PATH} && test -x {PORTACODE_GLOBAL_CLI_PATH}",
+            "retries": 0,
+        },
+        {
+            "name": "ensure_portacode_path",
+            "cmd": f"printf '%s\\n' 'export PATH=/usr/local/bin:{PORTACODE_VENV_DIR}/bin:$PATH' >/etc/profile.d/portacode_path.sh",
+            "retries": 0,
+        },
+    ])
+    if package_manager == "apt":
+        steps.append({
+            "name": "install_codex_dependencies",
+            "cmd": (
+                "if command -v node >/dev/null 2>&1 && "
+                "[ \"$(node -p 'process.versions.node.split(`.`)[0]')\" -ge 18 ] && "
+                "command -v npm >/dev/null 2>&1; then :; "
+                "else "
+                "  apt-get update -y || test $? -eq 100; "
+                "  apt-get install -y ca-certificates curl; "
+                "  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -; "
+                "  apt-get install -y nodejs; "
+                "fi && npm install -g @openai/codex@latest"
+            ),
+            "retries": 0,
+        })
+        steps.append({
+            "name": "install_playwright_chromium",
+            "cmd": (
+                "install -d -m 755 /opt/ms-playwright && "
+                "PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright "
+                "npx --yes playwright@latest install --with-deps chromium && "
+                "chmod -R a+rX /opt/ms-playwright && "
+                "printf '%s\\n' 'export PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright' "
+                ">/etc/profile.d/portacode_playwright.sh"
+            ),
+            "retries": 0,
+        })
+    elif package_manager == "apk":
+        steps.append({
+            "name": "install_codex_dependencies",
+            "cmd": "apk add --no-cache nodejs npm && npm install -g @openai/codex@latest",
+            "retries": 0,
+        })
+    return steps
+
+
+def _dynamic_bootstrap_steps(user: str, password: str, ssh_key: str) -> List[Dict[str, Any]]:
+    full = _build_bootstrap_steps(
+        user, password, ssh_key, include_portacode_connect=False, package_manager="apt"
+    )
+    cached_names = {step["name"] for step in _cacheable_bootstrap_steps("apt")}
+    steps = [step for step in full if step.get("name") not in cached_names]
+    steps.insert(0, {"name": "wait_for_network", "cmd": _NETWORK_WAIT_CMD, "retries": 0})
+    steps.insert(1, {
+        "name": "refresh_portacode",
+        "cmd": _pinned_portacode_install_command(),
+        "retries": 0,
+    })
+    return steps
+
+
+def _sanitize_container_for_cache(vmid: int) -> None:
+    """Remove clone-unsafe identity, secrets, runtime state and service state."""
+    command = (
+        "systemctl disable --now portacode.service >/dev/null 2>&1 || true; "
+        "passwd -l root >/dev/null 2>&1 || true; "
+        "rm -rf /root/.ssh /home/*/.ssh; "
+        "rm -rf /root/.local/share/portacode /root/.codex /home/*/.local/share/portacode /home/*/.codex; "
+        "rm -f /etc/ssh/ssh_host_* /etc/machine-id /var/lib/dbus/machine-id; "
+        "touch /etc/machine-id; "
+        "rm -f /etc/portacode/codex.env /etc/profile.d/portacode_codex.sh; "
+        "rm -rf /var/log/* /tmp/* /var/tmp/*; "
+        "if command -v apt-get >/dev/null 2>&1; then apt-get clean; rm -rf /var/lib/apt/lists/*; fi"
+    )
+    _run_pct_check(vmid, command)
+
+
+def _save_provisioning_cache(proxmox: Any, node: str, vmid: int, source_template: str) -> str:
+    """Stop and archive a sanitized container, then restart it for this request."""
+    volid = _provisioning_cache_volid(source_template)
+    destination = _pvesm_path(volid)
+    if destination is None:
+        source_path = _pvesm_path(source_template)
+        if source_path is None:
+            raise RuntimeError(f"Unable to resolve template storage path for {source_template}")
+        destination = source_path.parent / _provisioning_cache_filename(source_template)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    _sanitize_container_for_cache(vmid)
+    _stop_container(proxmox, node, vmid)
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=".portacode-vzdump-", dir=str(destination.parent)
+        ) as dump_dir:
+            # vzdump enters its temporary root through lxc-usernsexec for
+            # unprivileged containers (mapped UID 100000+). TemporaryDirectory
+            # defaults to 0700, which prevents that mapped process from
+            # traversing the staging directory.
+            os.chmod(dump_dir, 0o755)
+            result = _call_subprocess([
+                "vzdump", str(vmid), "--dumpdir", dump_dir, "--mode", "stop", "--compress", "zstd",
+            ], check=False)
+            if result.returncode != 0:
+                raise RuntimeError(f"Failed to save provisioning cache: {_command_failure_details(['vzdump', str(vmid)], result)}")
+            archives = list(Path(dump_dir).glob("*.tar.zst"))
+            if len(archives) != 1:
+                raise RuntimeError("vzdump did not produce exactly one LXC archive")
+            os.replace(archives[0], destination)
+            cache_id = re.sub(r"[^a-zA-Z0-9._-]+", "-", PROVISIONING_CACHE_ID)
+            family_prefix = destination.name.rsplit(f"-{cache_id}.tar.zst", 1)[0]
+            for stale in destination.parent.glob(f"{family_prefix}-*.tar.zst"):
+                if stale != destination:
+                    # Cache archives never contain user data; old schema generations
+                    # are safe to prune and otherwise consume substantial disk.
+                    try:
+                        stale.unlink()
+                    except OSError:
+                        logger.warning("Unable to prune stale provisioning cache %s", stale)
+    finally:
+        _start_container(proxmox, node, vmid)
+    return volid
 
 
 _NETWORK_WAIT_CMD = (
@@ -2995,6 +3197,10 @@ def _instantiate_container(
         payload["hostname"] = f"ct{vmid}"
 
     def _submit_create(feature_flags: Optional[str]) -> Any:
+        # Managed containers are personalized only after any reusable cache
+        # archive has been created. Never allow request credentials into the
+        # source filesystem from which a shared archive may be produced.
+        defer_credentials = bool(payload.get("defer_credentials"))
         kwargs = {
             "vmid": vmid,
             "hostname": payload["hostname"],
@@ -3007,8 +3213,8 @@ def _instantiate_container(
             "net0": payload["net0"],
             "unprivileged": int(payload.get("unprivileged", 1)),
             "description": payload.get("description", MANAGED_MARKER),
-            "password": payload.get("password") or None,
-            "ssh_public_keys": payload.get("ssh_public_key") or None,
+            "password": None if defer_credentials else (payload.get("password") or None),
+            "ssh_public_keys": None if defer_credentials else (payload.get("ssh_public_key") or None),
         }
         feature_flags = (feature_flags or "").strip()
         if feature_flags:
@@ -3148,17 +3354,15 @@ class CreateProxmoxContainerHandler(SyncHandler):
         template_candidates = config_guess.get("templates") or []
         template_hint = (message.get("template") or (template_candidates[0] if template_candidates else "")).strip()
         package_manager = _guess_package_manager_from_template(template_hint)
+        cached_template = _find_provisioning_cache(template_hint) if template_hint else None
         project_paths = _sanitize_project_paths(message.get("project_paths"))
         bootstrap_user, bootstrap_password, bootstrap_ssh_key = _get_provisioning_user_info(message)
-        bootstrap_steps = _build_bootstrap_steps(
-            bootstrap_user,
-            bootstrap_password,
-            bootstrap_ssh_key,
-            include_portacode_connect=False,
-            package_manager=package_manager,
-            project_paths=project_paths,
+        cache_steps = [] if cached_template else _cacheable_bootstrap_steps(package_manager)
+        bootstrap_steps = _dynamic_bootstrap_steps(
+            bootstrap_user, bootstrap_password, bootstrap_ssh_key
         )
-        total_steps = 4 + len(bootstrap_steps) + 2
+        # lifecycle + cache/base setup + per-device setup + auth/service + Codex
+        total_steps = 4 + len(cache_steps) + len(bootstrap_steps) + 3
         current_step_index = 1
 
         def _run_lifecycle_step(
@@ -3296,6 +3500,20 @@ class CreateProxmoxContainerHandler(SyncHandler):
 
             node = config.get("node") or DEFAULT_NODE_NAME
             payload = _build_container_payload(message, config)
+            # Passwords and SSH keys are applied by the dynamic bootstrap only,
+            # after the cache-safe machine layer has been restored or archived.
+            payload["defer_credentials"] = True
+            source_template = payload["template"]
+            if cached_template:
+                logger.info(
+                    "Using provisioning cache %s for source template %s (schema=%s)",
+                    cached_template,
+                    source_template,
+                    PROVISIONING_CACHE_ID,
+                )
+                payload["template"] = cached_template
+                payload["provisioning_cache_hit"] = True
+                payload["source_template"] = source_template
             payload["cpulimit"] = float(payload["cpus"])
             payload["cores"] = int(max(math.ceil(payload["cpus"]), 1))
             payload["memory"] = int(payload["ram_mib"])
@@ -3396,6 +3614,9 @@ class CreateProxmoxContainerHandler(SyncHandler):
                             on_behalf_of_device=device_id,
                         )
                         vmid, _ = _instantiate_container(proxmox, node, payload, vmid=vmid)
+                        if payload.get("source_template"):
+                            payload["restore_template"] = payload["template"]
+                            payload["template"] = payload["source_template"]
                         logger.info(
                             "create_proxmox_container: create task completed request_id=%s vmid=%s",
                             request_id,
@@ -3480,6 +3701,10 @@ class CreateProxmoxContainerHandler(SyncHandler):
                         details["attempt"] = attempt
                     if error_summary:
                         details["error_summary"] = error_summary
+                    if (result or {}).get("stdout"):
+                        details["stdout"] = _clip_command_output((result or {}).get("stdout"), 1200)
+                    if (result or {}).get("stderr"):
+                        details["stderr"] = _clip_command_output((result or {}).get("stderr"), 1200)
                     _emit_progress_event(
                         self,
                         step_index=step_index,
@@ -3493,6 +3718,34 @@ class CreateProxmoxContainerHandler(SyncHandler):
                         details=details or None,
                         on_behalf_of_device=device_id,
                     )
+
+                if cache_steps:
+                    _cache_results, cache_ok = _run_setup_steps(
+                        vmid,
+                        cache_steps,
+                        payload_local["username"],
+                        progress_callback=_bootstrap_progress_callback,
+                        start_index=current_step_index,
+                        total_steps=total_steps,
+                    )
+                    if not cache_ok:
+                        detail = _cache_results[-1] if _cache_results else {}
+                        command_output = (
+                            detail.get("stderr")
+                            or detail.get("stdout")
+                            or detail.get("error_summary")
+                            or detail.get("name")
+                        )
+                        raise RuntimeError(
+                            "Provisioning cache preparation failed: "
+                            + _clip_command_output(str(command_output), 1200)
+                        )
+                    # No keypair or user-specific Codex state exists at this point.
+                    with PROVISIONING_CACHE_LOCK:
+                        _save_provisioning_cache(
+                            proxmox, node, vmid, payload_local.get("source_template") or source_template
+                        )
+                    current_step_index += len(cache_steps)
 
                 public_key, steps = _bootstrap_portacode(
                     vmid,
@@ -3625,6 +3878,56 @@ class CreateProxmoxContainerHandler(SyncHandler):
                     )
 
                     current_step_index += 2
+
+                    prepare_step = current_step_index
+                    prepare_label = "Preparing Codex"
+                    codex_supported = package_manager not in {"dnf", "yum", "zypper"}
+                    if codex_supported:
+                        _emit_progress_event(
+                            self,
+                            step_index=prepare_step,
+                            total_steps=total_steps,
+                            step_name="prepare_codex",
+                            step_label=prepare_label,
+                            status="in_progress",
+                            message="Installing and configuring Codex through Portacode…",
+                            phase="service",
+                            request_id=request_id,
+                            on_behalf_of_device=device_id,
+                        )
+                        prepare_result = _run_pct(
+                            vmid,
+                            _su_command(
+                                payload_local["username"],
+                                f"{shlex.quote(cli_path)} prepare codex",
+                            ),
+                        )
+                        if prepare_result["returncode"] != 0:
+                            raise RuntimeError(
+                                prepare_result.get("stderr")
+                                or prepare_result.get("stdout")
+                                or "portacode prepare codex failed"
+                            )
+                        prepare_message = "Codex preparation completed."
+                    else:
+                        prepare_message = (
+                            "Codex preparation skipped on Fedora/CentOS/openSUSE; "
+                            "this distribution is not supported yet."
+                        )
+                    _emit_progress_event(
+                        self,
+                        step_index=prepare_step,
+                        total_steps=total_steps,
+                        step_name="prepare_codex",
+                        step_label=prepare_label,
+                        status="completed",
+                        message=prepare_message,
+                        phase="service",
+                        request_id=request_id,
+                        details={"supported": codex_supported},
+                        on_behalf_of_device=device_id,
+                    )
+                    current_step_index += 1
 
                 _emit_host_event(
                     self,

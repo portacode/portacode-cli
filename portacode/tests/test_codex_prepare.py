@@ -8,9 +8,60 @@ import pytest
 from portacode.codex_prepare import (
     CodexPreparationError,
     _run,
+    _install_node_if_needed,
+    install_codex_dependencies,
     resolve_codex_home,
     write_codex_config,
 )
+
+
+def test_install_codex_dependencies_is_cache_safe(monkeypatch):
+    calls = []
+    monkeypatch.setattr("portacode.codex_prepare._authorize_sudo_if_needed", lambda: calls.append("sudo"))
+    monkeypatch.setattr("portacode.codex_prepare._install_node_if_needed", lambda: calls.append("node"))
+    monkeypatch.setattr("portacode.codex_prepare._install_codex", lambda: calls.append("codex"))
+    monkeypatch.setattr(
+        "portacode.codex_prepare._verify_loopback_proxy",
+        lambda: (_ for _ in ()).throw(AssertionError("install phase must not contact the proxy")),
+    )
+
+    install_codex_dependencies()
+
+    assert calls == ["sudo", "node", "codex"]
+
+
+def test_node_without_npm_is_not_treated_as_ready(monkeypatch):
+    commands = []
+    installed = {"npm": False}
+    monkeypatch.setattr("portacode.codex_prepare._node_major", lambda: 22)
+    monkeypatch.setattr("portacode.codex_prepare.platform.system", lambda: "Linux")
+    monkeypatch.setattr(
+        "portacode.codex_prepare.Path.read_text",
+        lambda self, **kwargs: "ID=ubuntu\n",
+    )
+    monkeypatch.setattr(
+        "portacode.codex_prepare.shutil.which",
+        lambda name: (
+            "/usr/bin/npm"
+            if name == "npm" and installed["npm"]
+            else None
+            if name in {"npm", "npm.cmd"}
+            else f"/usr/bin/{name}"
+        ),
+    )
+    def fake_run(command, **kwargs):
+        commands.append(list(command))
+        if list(command)[-3:] == ["install", "-y", "npm"]:
+            installed["npm"] = True
+
+    monkeypatch.setattr(
+        "portacode.codex_prepare._run",
+        fake_run,
+    )
+
+    _install_node_if_needed()
+
+    assert any(command[-3:] == ["install", "-y", "npm"] for command in commands)
 
 
 def test_run_allows_proxmox_apt_update_exit_100(monkeypatch):

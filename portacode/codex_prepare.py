@@ -99,18 +99,29 @@ def _authorize_sudo_if_needed() -> None:
 
 
 def _install_node_if_needed() -> None:
-    if _node_major() >= 18:
+    # Minimal distro images can ship ``node`` without the separate ``npm``
+    # package. Codex installation needs both, so do not treat Node alone as a
+    # complete prerequisite.
+    node_ready = _node_major() >= 18
+    npm_ready = bool(shutil.which("npm") or shutil.which("npm.cmd"))
+    if node_ready and npm_ready:
         return
     system = platform.system().lower()
     if system == "linux":
         os_release = Path("/etc/os-release")
         release = os_release.read_text(encoding="utf-8", errors="ignore").lower() if os_release.exists() else ""
         if "alpine" in release:
-            _run([*_sudo_prefix(), "apk", "add", "--no-cache", "nodejs", "npm"])
+            packages = ["npm"] if node_ready else ["nodejs", "npm"]
+            _run([*_sudo_prefix(), "apk", "add", "--no-cache", *packages])
         elif any(name in release for name in ("debian", "ubuntu")):
             # Exit 100: Proxmox enterprise.proxmox.com 401 without subscription.
             # Same tolerance as ensure_cloudflared / ensure_pyyaml / proxmox_infra.
             _run([*_sudo_prefix(), "apt-get", "update"], ok_returncodes=(0, 100))
+            if node_ready:
+                _run([*_sudo_prefix(), "apt-get", "install", "-y", "npm"])
+                if not (shutil.which("npm") or shutil.which("npm.cmd")):
+                    raise CodexPreparationError("npm installation completed but npm is not on PATH.")
+                return
             _run([*_sudo_prefix(), "apt-get", "install", "-y", "ca-certificates", "curl"])
             node_setup = "bash -" if not _sudo_prefix() else "sudo -E bash -"
             _run(["sh", "-c", f"curl -fsSL https://deb.nodesource.com/setup_22.x | {node_setup}"])
@@ -138,6 +149,8 @@ def _install_node_if_needed() -> None:
         raise CodexPreparationError(f"Unsupported operating system: {platform.system()}")
     if _node_major() < 18:
         raise CodexPreparationError("Node.js installation completed but Node.js 18+ is not available in this session.")
+    if not (shutil.which("npm") or shutil.which("npm.cmd")):
+        raise CodexPreparationError("Node.js installation completed but npm is not available in this session.")
 
 
 def _install_codex() -> None:
@@ -516,12 +529,8 @@ def _verify_loopback_proxy() -> None:
         raise CodexPreparationError("Portacode's local Codex proxy returned an unhealthy response.")
 
 
-def prepare_codex(on_progress: Optional[Callable[[str], None]] = None) -> Path:
-    """Install Codex and configure it to use the device-authenticated proxy.
-
-    ``on_progress`` receives short human-readable step labels so UIs can show
-    what the automatic setup is doing.
-    """
+def install_codex_dependencies(on_progress: Optional[Callable[[str], None]] = None) -> None:
+    """Install the cache-safe, machine-wide part of Codex preparation."""
     def progress(message: str) -> None:
         if on_progress:
             on_progress(message)
@@ -532,6 +541,19 @@ def prepare_codex(on_progress: Optional[Callable[[str], None]] = None) -> Path:
     _install_node_if_needed()
     progress("Installing Codex CLI…")
     _install_codex()
+
+
+def prepare_codex(on_progress: Optional[Callable[[str], None]] = None) -> Path:
+    """Install Codex and configure it to use the device-authenticated proxy.
+
+    ``on_progress`` receives short human-readable step labels so UIs can show
+    what the automatic setup is doing.
+    """
+    def progress(message: str) -> None:
+        if on_progress:
+            on_progress(message)
+
+    install_codex_dependencies(on_progress=on_progress)
     progress("Writing Codex configuration…")
     config_path = _write_config()
     progress("Configuring local API access…")

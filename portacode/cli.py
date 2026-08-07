@@ -28,7 +28,7 @@ from .pairing import PairingError, pair_device_with_code
 from .connection.client import ConnectionManager, run_until_interrupt
 from .updater import build_pip_install_command, run_pip_install_command
 from .utils.runtime_paths import expand_runtime_path
-from .codex_prepare import CodexPreparationError, prepare_codex
+from .codex_prepare import CodexPreparationError, install_codex_dependencies, prepare_codex
 
 GATEWAY_URL = "wss://portacode.com/gateway"
 GATEWAY_ENV = "PORTACODE_GATEWAY"
@@ -47,10 +47,15 @@ def prepare() -> None:
 
 
 @prepare.command("codex")
-def prepare_codex_command() -> None:
+@click.option("--install-only", is_flag=True, hidden=True)
+def prepare_codex_command(install_only: bool = False) -> None:
     """Install and configure Codex CLI for the local device-authenticated proxy."""
     try:
         click.echo("Preparing Codex. First-time installation can take a few minutes...")
+        if install_only:
+            install_codex_dependencies()
+            click.echo(click.style("Codex dependencies are installed.", fg="green"))
+            return
         config_path = prepare_codex()
     except CodexPreparationError as exc:
         raise click.ClickException(str(exc)) from exc
