@@ -2653,6 +2653,20 @@ def _delete_container(proxmox: Any, node: str, vmid: int) -> Tuple[Dict[str, Any
     return _wait_for_task(proxmox, node, upid)
 
 
+def _require_successful_proxmox_task(
+    status: Dict[str, Any], operation: str, *, require_exitstatus: bool = False
+) -> None:
+    exitstatus = status.get("exitstatus")
+    if require_exitstatus and exitstatus is None:
+        raise RuntimeError(
+            f"Proxmox {operation} task returned no final exit status: {status}"
+        )
+    if exitstatus is not None and str(exitstatus).upper() != "OK":
+        raise RuntimeError(
+            f"Proxmox {operation} task failed ({exitstatus}): {status}"
+        )
+
+
 def _register_container_record(vmid: int, payload: Dict[str, Any], reservation_id: Optional[str] = None) -> None:
     _initialize_managed_containers_state()
     with _MANAGED_CONTAINERS_STATE_LOCK:
@@ -3433,7 +3447,10 @@ def build_snapshot(config: Dict[str, Any]) -> Dict[str, Any]:
     if not config:
         return {"configured": False, "network": base_network}
     _ensure_templates_refreshed_on_startup(config)
-    provisioning_templates = _maintain_provisioning_templates(config)
+    provisioning_templates = {
+        "cache_id": PROVISIONING_CACHE_ID,
+        "templates": _load_provisioning_templates(),
+    }
     return {
         "configured": True,
         "host": config.get("host"),
@@ -4799,7 +4816,6 @@ class RemoveProxmoxContainerHandler(SyncHandler):
             if not _is_proxmox_missing_container_error(exc):
                 raise
             _remove_container_record(vmid)
-            _maintain_provisioning_templates(config, force=True)
             infra = get_infra_snapshot()
             return {
                 "event": "proxmox_container_action",
@@ -4818,9 +4834,12 @@ class RemoveProxmoxContainerHandler(SyncHandler):
             }
 
         stop_status, stop_elapsed = _stop_container(proxmox, node, vmid)
+        _require_successful_proxmox_task(stop_status, "container stop")
         delete_status, delete_elapsed = _delete_container(proxmox, node, vmid)
+        _require_successful_proxmox_task(
+            delete_status, "container deletion", require_exitstatus=True
+        )
         _remove_container_record(vmid)
-        _maintain_provisioning_templates(config, force=True)
 
         infra = get_infra_snapshot()
         return {

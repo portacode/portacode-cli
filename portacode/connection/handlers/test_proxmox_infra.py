@@ -21,11 +21,33 @@ from portacode.connection.handlers.proxmox_infra import (
     _reconcile_native_template_registry,
     _resolve_user_data_dir,
     _pinned_portacode_install_command,
+    _require_successful_proxmox_task,
     _sanitize_project_paths,
 )
 
 
 class ProxmoxInfraHandlerTests(TestCase):
+    def test_failed_proxmox_task_is_not_accepted_as_success(self):
+        with self.assertRaisesRegex(RuntimeError, "container deletion task failed"):
+            _require_successful_proxmox_task(
+                {"status": "stopped", "exitstatus": "storage error"},
+                "container deletion",
+            )
+
+    def test_successful_proxmox_task_is_accepted(self):
+        _require_successful_proxmox_task(
+            {"status": "stopped", "exitstatus": "OK"},
+            "container deletion",
+        )
+
+    def test_delete_task_without_final_status_is_not_accepted(self):
+        with self.assertRaisesRegex(RuntimeError, "no final exit status"):
+            _require_successful_proxmox_task(
+                {"status": "stopped"},
+                "container deletion",
+                require_exitstatus=True,
+            )
+
     @patch("portacode.connection.handlers.proxmox_infra._run_pct_check")
     def test_resolve_user_data_dir_uses_passwd_lookup_not_login_shell(self, mock_run_pct_check):
         mock_run_pct_check.return_value = {"stdout": "/root", "stderr": "", "returncode": 0}
@@ -568,3 +590,37 @@ class ProxmoxInfraHandlerTests(TestCase):
         self.assertIn("already deleted", response["message"])
         mock_clear_forwarding.assert_called_once_with("42", [])
         mock_remove_record.assert_called_once_with(134)
+
+    @patch("portacode.connection.handlers.proxmox_infra._delete_container")
+    @patch("portacode.connection.handlers.proxmox_infra._stop_container")
+    @patch("portacode.connection.handlers.proxmox_infra._remove_container_record")
+    @patch("portacode.connection.handlers.proxmox_infra._ensure_container_managed")
+    @patch("portacode.connection.handlers.proxmox_infra._read_container_record")
+    @patch("portacode.connection.handlers.proxmox_infra._get_node_from_config", return_value="pve2")
+    @patch("portacode.connection.handlers.proxmox_infra._connect_proxmox", return_value=object())
+    @patch("portacode.connection.handlers.proxmox_infra._ensure_infra_configured", return_value={"token_value": "x"})
+    @patch("portacode.connection.handlers.cloudflare_forwarding.set_container_forwarding_rules")
+    def test_remove_container_preserves_metadata_when_proxmox_delete_task_fails(
+        self,
+        _mock_clear_forwarding,
+        _mock_configured,
+        _mock_connect,
+        _mock_get_node,
+        mock_read_record,
+        _mock_ensure_managed,
+        mock_remove_record,
+        mock_stop,
+        mock_delete,
+    ):
+        mock_read_record.return_value = {"vmid": 134, "device_id": "42"}
+        mock_stop.return_value = ({"status": "stopped", "exitstatus": "OK"}, 0.1)
+        mock_delete.return_value = (
+            {"status": "stopped", "exitstatus": "storage error"},
+            0.1,
+        )
+
+        handler = RemoveProxmoxContainerHandler(control_channel=MagicMock(), context={})
+        with self.assertRaisesRegex(RuntimeError, "container deletion task failed"):
+            handler.execute({"child_device_id": "42", "ctid": "134"})
+
+        mock_remove_record.assert_not_called()

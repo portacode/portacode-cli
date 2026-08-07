@@ -500,12 +500,15 @@ class TerminalManager:
                 pass
         self._system_info_task = asyncio.create_task(self._periodic_system_info())
 
-        # Cache migration and native-template retirement must not depend on a
-        # dashboard client requesting system_info. Run it off the event loop so
-        # reconnecting the node stays responsive while Proxmox is inspected.
-        from .handlers.proxmox_infra import maintain_provisioning_templates_on_startup
-        asyncio.create_task(
-            asyncio.to_thread(maintain_provisioning_templates_on_startup)
+        # Cache migration and native-template retirement run independently of
+        # user-device deletion and do not require a dashboard client.
+        if getattr(self, "_provisioning_template_maintenance_task", None):
+            try:
+                self._provisioning_template_maintenance_task.cancel()
+            except Exception:
+                pass
+        self._provisioning_template_maintenance_task = asyncio.create_task(
+            self._periodic_provisioning_template_maintenance()
         )
 
         # Start exposed-services file monitor for realtime updates.
@@ -662,6 +665,22 @@ class TerminalManager:
             except Exception as exc:
                 logger.exception("Error in periodic system info: %s", exc)
                 continue
+
+    async def _periodic_provisioning_template_maintenance(self) -> None:
+        """Maintain native templates without touching the deletion hot path."""
+        from .handlers.proxmox_infra import (
+            PROVISIONING_MAINTENANCE_INTERVAL_S,
+            maintain_provisioning_templates_on_startup,
+        )
+
+        while True:
+            try:
+                await asyncio.to_thread(maintain_provisioning_templates_on_startup)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception("Provisioning template maintenance failed: %s", exc)
+            await asyncio.sleep(PROVISIONING_MAINTENANCE_INTERVAL_S)
 
     def _read_exposed_services_snapshot(self) -> Dict[str, Any]:
         path = EXPOSED_SERVICES_MONITOR_PATH
