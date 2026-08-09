@@ -15,6 +15,7 @@ from .terminal_handlers import (
     TerminalExecHandler,
 )
 from .system_handlers import SystemInfoHandler
+from .browser_handlers import BrowserRunHandler
 from .update_handler import UpdatePortacodeHandler
 from .file_handlers import (
     FileReadHandler,
@@ -93,6 +94,7 @@ __all__ = [
     "TerminalListHandler",
     "TerminalExecHandler",
     "SystemInfoHandler",
+    "BrowserRunHandler",
     "ConfigureProxmoxInfraHandler",
     "CreateProxmoxContainerHandler",
     # File operation handlers (optional - register as needed)

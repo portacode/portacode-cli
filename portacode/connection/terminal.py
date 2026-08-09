@@ -34,6 +34,7 @@ from .handlers import (
     TerminalListHandler,
     TerminalExecHandler,
     SystemInfoHandler,
+    BrowserRunHandler,
     FileReadHandler,
     ImageReadHandler,
     DirectoryListHandler,
@@ -533,6 +534,7 @@ class TerminalManager:
         self._command_registry.register(TerminalListHandler)
         self._command_registry.register(TerminalExecHandler)
         self._command_registry.register(SystemInfoHandler)
+        self._command_registry.register(BrowserRunHandler)
         # File operation handlers
         self._command_registry.register(FileReadHandler)
         self._command_registry.register(ImageReadHandler)
