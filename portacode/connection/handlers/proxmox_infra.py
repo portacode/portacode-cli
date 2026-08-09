@@ -45,6 +45,8 @@ PROVISIONING_ID_MARKER = "provisioning_id="
 PROVISIONING_CACHE_PREFIX = "portacode-ready"
 PROVISIONING_CACHE_LOCK = threading.Lock()
 PROVISIONING_TEMPLATES_PATH = CONFIG_DIR / "provisioning_templates.json"
+DELETION_TOMBSTONES_PATH = CONFIG_DIR / "proxmox_deletion_tombstones.json"
+DELETION_TOMBSTONES_LOCK = threading.Lock()
 PORTACODE_CACHE_MARKER = "portacode-cache:true"
 CACHE_ID_MARKER = "cache_id="
 CACHE_SOURCE_MARKER = "cache_source="
@@ -92,6 +94,41 @@ def _extract_marker_value(description: str, prefix: str) -> Optional[str]:
 
 def _parse_device_id_from_description(description: str) -> Optional[str]:
     return _extract_marker_value(description, DEVICE_ID_MARKER)
+
+
+def _load_deletion_tombstones() -> Dict[str, str]:
+    try:
+        payload = json.loads(DELETION_TOMBSTONES_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    records = payload.get("devices") if isinstance(payload, dict) else None
+    return {
+        str(device_id): str(requested_at)
+        for device_id, requested_at in (records or {}).items()
+        if str(device_id).strip()
+    }
+
+
+def _mark_device_deletion_requested(device_id: str) -> None:
+    with DELETION_TOMBSTONES_LOCK:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        records = _load_deletion_tombstones()
+        records[str(device_id)] = _current_time_iso()
+        tmp_path = DELETION_TOMBSTONES_PATH.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps({"devices": records}, indent=2), encoding="utf-8")
+        os.replace(tmp_path, DELETION_TOMBSTONES_PATH)
+        os.chmod(DELETION_TOMBSTONES_PATH, 0o600)
+
+
+def _device_deletion_requested(device_id: str) -> bool:
+    return str(device_id) in _load_deletion_tombstones()
+
+
+def _raise_if_device_deletion_requested(device_id: str) -> None:
+    if _device_deletion_requested(device_id):
+        raise RuntimeError(
+            f"Provisioning cancelled because deletion was requested for device {device_id}."
+        )
 
 DEFAULT_HOST = "localhost"
 DEFAULT_NODE_NAME = os.uname().nodename.split(".", 1)[0]
@@ -2173,6 +2210,19 @@ def _cacheable_bootstrap_steps(package_manager: str) -> List[Dict[str, Any]]:
     """Expensive steps that are safe to preserve without a device identity."""
     profile = _PACKAGE_MANAGER_PROFILES.get(package_manager, _PACKAGE_MANAGER_PROFILES["apt"])
     steps: List[Dict[str, Any]] = [{"name": "wait_for_network", "cmd": _NETWORK_WAIT_CMD, "retries": 0}]
+    if package_manager == "apk":
+        steps.append({
+            "name": "upgrade_legacy_alpine",
+            "cmd": (
+                "version=$(cut -d. -f1,2 /etc/alpine-release); "
+                "major=${version%%.*}; minor=${version#*.}; "
+                "if [ \"$major\" -lt 3 ] || { [ \"$major\" -eq 3 ] && [ \"$minor\" -lt 20 ]; }; then "
+                "  sed -i -E 's#/v[0-9]+\\.[0-9]+/#/v3.22/#g' /etc/apk/repositories; "
+                "  apk update && apk upgrade --available; "
+                "fi"
+            ),
+            "retries": 0,
+        })
     if profile.get("update_cmd"):
         steps.append({
             "name": profile.get("update_step_name", "package_update"),
@@ -2223,11 +2273,15 @@ def _cacheable_bootstrap_steps(package_manager: str) -> List[Dict[str, Any]]:
             "name": "install_playwright_chromium",
             "cmd": (
                 "install -d -m 755 /opt/ms-playwright && "
+                "npm install -g playwright@latest && "
                 "PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright "
-                "npx --yes playwright@latest install --with-deps chromium && "
+                "playwright install --with-deps chromium && "
                 "chmod -R a+rX /opt/ms-playwright && "
                 "printf '%s\\n' 'export PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright' "
-                ">/etc/profile.d/portacode_playwright.sh"
+                "\"export NODE_PATH=$(npm root -g)\" >/etc/profile.d/portacode_playwright.sh && "
+                "PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright playwright screenshot "
+                "--browser chromium about:blank /tmp/portacode-playwright-smoke.png && "
+                "test -s /tmp/portacode-playwright-smoke.png && rm /tmp/portacode-playwright-smoke.png"
             ),
             "retries": 0,
         })
@@ -2235,6 +2289,32 @@ def _cacheable_bootstrap_steps(package_manager: str) -> List[Dict[str, Any]]:
         steps.append({
             "name": "install_codex_dependencies",
             "cmd": "apk add --no-cache nodejs npm && npm install -g @openai/codex@latest",
+            "retries": 0,
+        })
+        steps.append({
+            "name": "install_playwright_chromium",
+            "cmd": (
+                "apk add --no-cache chromium nss freetype harfbuzz ca-certificates "
+                "font-freefont ffmpeg && "
+                "npm install -g playwright@latest && "
+                "install -d -m 755 /opt/ms-playwright && "
+                "set -- $(PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright "
+                "playwright install --dry-run chromium | awk '/Install location:/ {print $3}'); "
+                "chromium_dir=$1; ffmpeg_dir=$2; headless_dir=$3; "
+                "test -n \"$chromium_dir\" && test -n \"$ffmpeg_dir\" && test -n \"$headless_dir\" && "
+                "install -d \"$chromium_dir/chrome-linux64\" "
+                "\"$headless_dir/chrome-headless-shell-linux64\" \"$ffmpeg_dir\" && "
+                "ln -sfn /usr/bin/chromium-browser \"$chromium_dir/chrome-linux64/chrome\" && "
+                "ln -sfn /usr/bin/chromium-browser "
+                "\"$headless_dir/chrome-headless-shell-linux64/chrome-headless-shell\" && "
+                "ln -sfn /usr/bin/ffmpeg \"$ffmpeg_dir/ffmpeg-linux\" && "
+                "chmod -R a+rX /opt/ms-playwright && "
+                "printf '%s\\n' 'export PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright' "
+                "\"export NODE_PATH=$(npm root -g)\" >/etc/profile.d/portacode_playwright.sh && "
+                "PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright playwright screenshot "
+                "--browser chromium about:blank /tmp/portacode-playwright-smoke.png && "
+                "test -s /tmp/portacode-playwright-smoke.png && rm /tmp/portacode-playwright-smoke.png"
+            ),
             "retries": 0,
         })
     return steps
@@ -2706,6 +2786,25 @@ def _remove_container_record(vmid: int) -> None:
     if path.exists():
         path.unlink()
     _unregister_container_record(vmid)
+
+
+def _remove_container_records_for_device(device_id: str) -> List[int]:
+    """Remove local metadata for a device after Proxmox proves no CT exists."""
+    removed: List[int] = []
+    for path in sorted(CONTAINERS_DIR.glob("ct-*.json")):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if str(record.get("device_id") or "") != str(device_id):
+            continue
+        try:
+            vmid = int(record.get("vmid") or path.stem.removeprefix("ct-"))
+        except (TypeError, ValueError):
+            continue
+        _remove_container_record(vmid)
+        removed.append(vmid)
+    return removed
 
 
 def _build_container_payload(message: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
@@ -3568,9 +3667,9 @@ def revert_infrastructure() -> Dict[str, Any]:
     return snapshot
 
 
-def _allocate_vmid(proxmox: Any) -> int:
+def _allocate_vmid(proxmox: Any, vmid: Optional[int] = None) -> int:
     value = _run_with_timeout(
-        lambda: proxmox.cluster.nextid.get(),
+        lambda: proxmox.cluster.nextid.get(**({"vmid": int(vmid)} if vmid is not None else {})),
         timeout_s=PROXMOX_CREATE_SUBMIT_TIMEOUT_S,
         context="Proxmox nextid allocation",
     )
@@ -3578,7 +3677,8 @@ def _allocate_vmid(proxmox: Any) -> int:
 
 
 def _claim_ctid_for_reservation(reservation_id: str, proxmox: Any) -> int:
-    """Allocate a CTID while holding the managed-state lock to prevent races."""
+    """Allocate a CTID, reconciling stale records and concurrent reservations."""
+    ctid_candidate = _allocate_vmid(proxmox)
     while True:
         with _acquire_state_lock("ctid_precheck"):
             entry = _MANAGED_CONTAINERS_STATE.get("pending", {}).get(reservation_id)
@@ -3590,13 +3690,6 @@ def _claim_ctid_for_reservation(reservation_id: str, proxmox: Any) -> int:
                     return int(existing_ctid)
                 except (TypeError, ValueError):
                     pass
-        logger.debug("Allocating nextid for reservation_id=%s", reservation_id)
-        ctid_candidate = _allocate_vmid(proxmox)
-        logger.debug(
-            "Proposed CTID %s for reservation_id=%s; validating against pending map",
-            ctid_candidate,
-            reservation_id,
-        )
         with _acquire_state_lock("ctid_commit"):
             entry = _MANAGED_CONTAINERS_STATE.get("pending", {}).get(reservation_id)
             if entry is None:
@@ -3607,16 +3700,44 @@ def _claim_ctid_for_reservation(reservation_id: str, proxmox: Any) -> int:
                     return int(existing_ctid)
                 except (TypeError, ValueError):
                     pass
-            reserved_ctids = _collect_reserved_ctids_locked()
-            if ctid_candidate in reserved_ctids:
+            records = _MANAGED_CONTAINERS_STATE.get("records", {})
+            stale_record = records.pop(str(ctid_candidate), None)
+            if stale_record is not None:
+                stale_path = CONTAINERS_DIR / f"ct-{ctid_candidate}.json"
+                try:
+                    stale_path.unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning("Unable to remove stale CTID record %s: %s", stale_path, exc)
+                logger.warning(
+                    "Discarded stale managed-container record for free Proxmox CTID %s device_id=%s",
+                    ctid_candidate,
+                    stale_record.get("device_id"),
+                )
+            pending_ctids = {
+                int(candidate)
+                for pending_id, pending_entry in _MANAGED_CONTAINERS_STATE.get("pending", {}).items()
+                if pending_id != reservation_id
+                for candidate in [pending_entry.get("ctid")]
+                if candidate is not None and str(candidate).isdigit()
+            }
+            if ctid_candidate in pending_ctids:
                 logger.debug(
-                    "CTID %s already reserved; retrying allocation for reservation_id=%s",
+                    "CTID %s is pending; selecting a higher candidate for reservation_id=%s",
                     ctid_candidate,
                     reservation_id,
                 )
-                continue
-            entry["ctid"] = ctid_candidate
-            return ctid_candidate
+            else:
+                entry["ctid"] = ctid_candidate
+                return ctid_candidate
+        proposed = max([ctid_candidate + 1, *[value + 1 for value in pending_ctids]])
+        while True:
+            try:
+                ctid_candidate = _allocate_vmid(proxmox, vmid=proposed)
+                break
+            except Exception as exc:
+                if "already exists" not in str(exc).lower():
+                    raise
+                proposed += 1
 
 
 def _instantiate_container(
@@ -4029,6 +4150,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
 
                 def _create_container():
                     nonlocal proxmox, vmid, created_record
+                    _raise_if_device_deletion_requested(device_id)
                     proxmox = _connect_proxmox(config)
                     logger.info(
                         "create_proxmox_container: starting create stage request_id=%s device_id=%s node=%s",
@@ -4108,6 +4230,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
                             vmid, _ = _instantiate_container(
                                 proxmox, node, builder_payload, vmid=vmid
                             )
+                        _raise_if_device_deletion_requested(device_id)
                         logger.info(
                             "create_proxmox_container: create task completed request_id=%s vmid=%s",
                             request_id,
@@ -4157,6 +4280,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
                 )
 
                 def _start_container_step():
+                    _raise_if_device_deletion_requested(device_id)
                     _start_container(proxmox, node, vmid)
 
                 _run_lifecycle_step(
@@ -4176,6 +4300,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
                     status: str,
                     result: Optional[Dict[str, Any]],
                 ):
+                    _raise_if_device_deletion_requested(device_id)
                     label = step.get("display_name") or _friendly_step_label(step.get("name", "bootstrap"))
                     error_summary = (result or {}).get("error_summary") or (result or {}).get("error")
                     attempt = (result or {}).get("attempt")
@@ -4246,6 +4371,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
                             PROVISIONING_TEMPLATE_BASE_DISK_GIB,
                         ),
                     )
+                    _raise_if_device_deletion_requested(device_id)
                     builder_vmid = vmid
                     vmid = _reassign_reservation_ctid(
                         reservation_id, builder_vmid, proxmox
@@ -4263,6 +4389,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
                         vmid,
                         payload_local,
                     )
+                    _raise_if_device_deletion_requested(device_id)
                     _write_container_record(
                         vmid, payload_local, reservation_id=reservation_id
                     )
@@ -4277,6 +4404,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
                     # Keep progress indices aligned without rerunning cached work.
                     current_step_index += len(all_cache_steps)
 
+                _raise_if_device_deletion_requested(device_id)
                 public_key, steps = _bootstrap_portacode(
                     vmid,
                     payload_local["username"],
@@ -4765,6 +4893,7 @@ class RemoveProxmoxContainerHandler(SyncHandler):
         if not child_device_id:
             raise ValueError("child_device_id is required for remove_proxmox_container")
         request_id = message.get("request_id")
+        _mark_device_deletion_requested(child_device_id)
         config = _ensure_infra_configured()
         proxmox = _connect_proxmox(config)
         node = _get_node_from_config(config)
@@ -4776,15 +4905,21 @@ class RemoveProxmoxContainerHandler(SyncHandler):
             except _DeviceLookupError:
                 try:
                     vmid = _resolve_vmid_for_device_in_proxmox(proxmox, node, child_device_id)
-                except _DeviceLookupError as exc:
+                except _DeviceLookupError:
+                    removed_records = _remove_container_records_for_device(child_device_id)
                     infra = get_infra_snapshot()
                     return {
                         "event": "proxmox_container_action",
                         "action": "remove",
-                        "success": False,
-                        "message": str(exc),
-                        "status": "not_found",
+                        "success": True,
+                        "message": (
+                            "No Proxmox container exists for this device; deletion intent was "
+                            "recorded and stale local metadata was removed."
+                        ),
+                        "status": "deleted",
                         "child_device_id": child_device_id,
+                        "ctid": None,
+                        "details": {"removed_local_records": removed_records},
                         "request_id": request_id,
                         "infra": infra,
                     }
@@ -4857,6 +4992,177 @@ class RemoveProxmoxContainerHandler(SyncHandler):
             "request_id": request_id,
             "infra": infra,
         }
+
+
+def _description_markers(description: str) -> Dict[str, str]:
+    markers: Dict[str, str] = {}
+    for part in str(description or "").split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" in part:
+            key, value = part.split("=", 1)
+            markers[key.strip()] = value.strip()
+        elif ":" in part:
+            key, value = part.split(":", 1)
+            markers[key.strip()] = value.strip()
+    return markers
+
+
+def _linked_clone_parent_vmid(rootfs: Any) -> Optional[int]:
+    match = re.search(r"(?:^|:)base-(\d+)-disk-\d+", str(rootfs or ""))
+    return int(match.group(1)) if match else None
+
+
+def build_proxmox_resource_audit() -> Dict[str, Any]:
+    """Return a credential-free live inventory for staff-side reconciliation."""
+    config = _ensure_infra_configured()
+    proxmox = _connect_proxmox(config)
+    node = _get_node_from_config(config)
+    local_records = {str(record.get("vmid")): record for record in _load_managed_container_records()}
+    template_registry = _load_provisioning_templates()
+    registry_by_vmid = {str(record.get("vmid")): record for record in template_registry}
+    tombstones = _load_deletion_tombstones()
+    source_by_hash = {
+        _cache_source_hash(source): source for source in (config.get("templates") or []) if source
+    }
+    resources: List[Dict[str, Any]] = []
+
+    for kind, getter in (("lxc", "lxc"), ("qemu", "qemu")):
+        for summary in getattr(proxmox.nodes(node), getter).get() or []:
+            vmid = str(summary.get("vmid"))
+            try:
+                resource_config = getattr(proxmox.nodes(node), getter)(vmid).config.get() or {}
+            except Exception as exc:
+                resource_config = {}
+                config_error = str(exc)
+            else:
+                config_error = None
+            description = str(resource_config.get("description") or "")
+            markers = _description_markers(description)
+            is_template = kind == "lxc" and _parse_onboot_flag(resource_config.get("template"))
+            is_cache = PORTACODE_CACHE_MARKER in description
+            is_managed = MANAGED_MARKER in description
+            device_id = markers.get(DEVICE_ID_MARKER.rstrip("="))
+            parent_vmid = _linked_clone_parent_vmid(resource_config.get("rootfs")) if kind == "lxc" else None
+            registry_record = registry_by_vmid.get(vmid) or {}
+            local_record = local_records.get(vmid) or {}
+            warnings: List[str] = []
+            if is_managed and not device_id:
+                warnings.append("Managed marker has no device_id")
+            if device_id and device_id in tombstones:
+                warnings.append("Deletion requested but Proxmox resource still exists")
+            if is_managed and not local_record:
+                warnings.append("Managed resource has no local metadata record")
+            if is_cache and not registry_record:
+                warnings.append("Cache template is missing from the template registry")
+            if registry_record.get("status") == "stale" or (
+                is_cache and markers.get("cache_id") != PROVISIONING_CACHE_ID
+            ):
+                warnings.append("Cache template is stale")
+            if config_error:
+                warnings.append("Unable to read Proxmox resource configuration")
+            resources.append({
+                "kind": kind,
+                "vmid": vmid,
+                "name": summary.get("name") or resource_config.get("hostname") or f"{kind}-{vmid}",
+                "status": str(summary.get("status") or "unknown").lower(),
+                "is_template": is_template,
+                "is_cache_template": is_cache,
+                "is_portacode_managed": is_managed or is_cache,
+                "device_id": device_id,
+                "provisioning_id": markers.get("provisioning_id"),
+                "deletion_requested_at": tombstones.get(str(device_id)) if device_id else None,
+                "parent_template_vmid": str(parent_vmid) if parent_vmid is not None else None,
+                "description": description,
+                "markers": markers,
+                "rootfs": resource_config.get("rootfs"),
+                "storage": _pick_container_storage(kind, resource_config, summary),
+                "disk_gib": _pick_container_disk_gib(kind, resource_config, summary),
+                "ram_mib": _pick_container_ram_mib(kind, resource_config, summary),
+                "cpu_share": _pick_container_cpu_share(kind, resource_config, summary),
+                "onboot": _parse_onboot_flag(resource_config.get("onboot")),
+                "created_at": local_record.get("created_at") or registry_record.get("created_at"),
+                "source_template": registry_record.get("source_template") or source_by_hash.get(markers.get("cache_source")),
+                "cache_id": registry_record.get("cache_id") or markers.get("cache_id"),
+                "cache_status": registry_record.get("status"),
+                "local_record": {
+                    key: local_record.get(key)
+                    for key in ("device_id", "hostname", "created_at", "template", "status", "provisioning_id")
+                    if local_record.get(key) is not None
+                },
+                "warnings": warnings,
+                "config_error": config_error,
+            })
+
+    live_vmids = {resource["vmid"] for resource in resources}
+    missing_resources = []
+    for vmid, record in local_records.items():
+        if vmid in live_vmids:
+            continue
+        missing_resources.append({
+            "vmid": vmid,
+            "device_id": str(record.get("device_id") or "") or None,
+            "hostname": record.get("hostname"),
+            "created_at": record.get("created_at"),
+            "template": record.get("template"),
+            "warning": "Local Portacode metadata exists but the Proxmox resource is absent",
+        })
+
+    dependents: Dict[str, List[str]] = {}
+    for resource in resources:
+        parent_vmid = resource.get("parent_template_vmid")
+        if parent_vmid:
+            dependents.setdefault(str(parent_vmid), []).append(resource["vmid"])
+    for resource in resources:
+        resource["dependent_vmids"] = dependents.get(resource["vmid"], [])
+
+    node_status = proxmox.nodes(node).status.get() or {}
+    storages = []
+    for storage in proxmox.nodes(node).storage.get() or []:
+        storage_name = storage.get("storage")
+        try:
+            status = proxmox.nodes(node).storage(storage_name).status.get() or {}
+        except Exception as exc:
+            status = {"error": str(exc)}
+        storages.append({
+            "storage": storage_name,
+            "type": storage.get("type"),
+            "active": storage.get("active"),
+            "enabled": storage.get("enabled"),
+            "content": storage.get("content"),
+            "total_gib": _bytes_to_gib(status.get("total")),
+            "used_gib": _bytes_to_gib(status.get("used")),
+            "available_gib": _bytes_to_gib(status.get("avail")),
+            "error": status.get("error"),
+        })
+    return {
+        "event": "proxmox_resource_audit",
+        "success": True,
+        "generated_at": _current_time_iso(),
+        "node": node,
+        "cache_id": PROVISIONING_CACHE_ID,
+        "host": {
+            "status": node_status.get("status") or "online",
+            "uptime_s": node_status.get("uptime"),
+            "cpu_fraction": node_status.get("cpu"),
+            "cpu_cores": (node_status.get("cpuinfo") or {}).get("cores"),
+            "memory_total_mib": _bytes_to_mib((node_status.get("memory") or {}).get("total")),
+            "memory_used_mib": _bytes_to_mib((node_status.get("memory") or {}).get("used")),
+        },
+        "storages": storages,
+        "resources": resources,
+        "missing_resources": missing_resources,
+    }
+
+
+class ProxmoxResourceAuditHandler(SyncHandler):
+    @property
+    def command_name(self) -> str:
+        return "proxmox_resource_audit"
+
+    def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        return build_proxmox_resource_audit()
 
 
 class ConfigureProxmoxInfraHandler(SyncHandler):

@@ -7,6 +7,7 @@ from portacode.connection.handlers.proxmox_infra import (
     RemoveProxmoxContainerHandler,
     _build_bootstrap_steps,
     _cacheable_bootstrap_steps,
+    _claim_ctid_for_reservation,
     _dynamic_bootstrap_steps,
     _enforce_service_venv_execstart,
     _get_provisioning_user_info,
@@ -27,6 +28,52 @@ from portacode.connection.handlers.proxmox_infra import (
 
 
 class ProxmoxInfraHandlerTests(TestCase):
+    @patch("portacode.connection.handlers.proxmox_infra._allocate_vmid", return_value=144)
+    def test_ctid_claim_discards_stale_record_when_proxmox_reports_id_free(self, mock_allocate):
+        state = {
+            "initialized": True,
+            "base_summary": {},
+            "initial_totals": {},
+            "records": {"144": {"vmid": 144, "device_id": "deleted-device"}},
+            "pending": {"request": {"ctid": None}},
+        }
+        with TemporaryDirectory() as root, patch(
+            "portacode.connection.handlers.proxmox_infra.CONTAINERS_DIR", Path(root)
+        ), patch(
+            "portacode.connection.handlers.proxmox_infra._MANAGED_CONTAINERS_STATE", state
+        ):
+            record_path = Path(root) / "ct-144.json"
+            record_path.write_text("{}")
+
+            claimed = _claim_ctid_for_reservation("request", MagicMock())
+
+        self.assertEqual(claimed, 144)
+        self.assertFalse(record_path.exists())
+        self.assertNotIn("144", state["records"])
+        self.assertEqual(state["pending"]["request"]["ctid"], 144)
+        mock_allocate.assert_called_once()
+
+    @patch("portacode.connection.handlers.proxmox_infra._allocate_vmid", side_effect=[144, 145])
+    def test_ctid_claim_selects_next_free_id_when_another_request_is_pending(self, mock_allocate):
+        state = {
+            "initialized": True,
+            "base_summary": {},
+            "initial_totals": {},
+            "records": {},
+            "pending": {
+                "first": {"ctid": 144},
+                "second": {"ctid": None},
+            },
+        }
+        with patch(
+            "portacode.connection.handlers.proxmox_infra._MANAGED_CONTAINERS_STATE", state
+        ):
+            claimed = _claim_ctid_for_reservation("second", MagicMock())
+
+        self.assertEqual(claimed, 145)
+        self.assertEqual(state["pending"]["second"]["ctid"], 145)
+        self.assertEqual(mock_allocate.call_args_list[1].kwargs["vmid"], 145)
+
     def test_failed_proxmox_task_is_not_accepted_as_success(self):
         with self.assertRaisesRegex(RuntimeError, "container deletion task failed"):
             _require_successful_proxmox_task(
@@ -138,8 +185,31 @@ class ProxmoxInfraHandlerTests(TestCase):
         self.assertIn("install_codex_dependencies", apt_names)
         self.assertIn("install_codex_dependencies", apk_names)
         self.assertIn("install_playwright_chromium", apt_names)
+        self.assertIn("install_playwright_chromium", apk_names)
         self.assertNotIn("install_codex_dependencies", dnf_names)
         self.assertNotIn("install_codex_dependencies", zypper_names)
+
+        apt_playwright = next(
+            step for step in _cacheable_bootstrap_steps("apt")
+            if step["name"] == "install_playwright_chromium"
+        )["cmd"]
+        apk_playwright = next(
+            step for step in _cacheable_bootstrap_steps("apk")
+            if step["name"] == "install_playwright_chromium"
+        )["cmd"]
+        self.assertIn("npm install -g playwright@latest", apt_playwright)
+        self.assertIn("playwright screenshot", apt_playwright)
+        self.assertIn("apk add --no-cache chromium", apk_playwright)
+        self.assertIn("/usr/bin/chromium-browser", apk_playwright)
+        self.assertIn("playwright screenshot", apk_playwright)
+
+    def test_legacy_alpine_is_upgraded_before_python_venv_is_created(self):
+        steps = _cacheable_bootstrap_steps("apk")
+        names = [step["name"] for step in steps]
+
+        self.assertLess(names.index("upgrade_legacy_alpine"), names.index("create_portacode_venv"))
+        upgrade = next(step for step in steps if step["name"] == "upgrade_legacy_alpine")
+        self.assertIn("apk upgrade --available", upgrade["cmd"])
 
     def test_cache_codex_install_does_not_depend_on_child_portacode_cli_version(self):
         for manager in ("apt", "apk"):
@@ -557,6 +627,7 @@ class ProxmoxInfraHandlerTests(TestCase):
         self.assertIn("'\"'\"'$$HOME/.openclaw'\"'\"'", issued_command)
         self.assertIn("'\"'\"'$$HOME/.openclaw/workspace'\"'\"'", issued_command)
 
+    @patch("portacode.connection.handlers.proxmox_infra._mark_device_deletion_requested")
     @patch("portacode.connection.handlers.proxmox_infra.get_infra_snapshot", return_value={})
     @patch("portacode.connection.handlers.proxmox_infra._remove_container_record")
     @patch("portacode.connection.handlers.proxmox_infra._ensure_container_managed")
@@ -575,6 +646,7 @@ class ProxmoxInfraHandlerTests(TestCase):
         mock_ensure_managed,
         mock_remove_record,
         _mock_snapshot,
+        mock_mark_deletion,
     ):
         mock_read_record.return_value = {"vmid": 134, "device_id": "42"}
         mock_ensure_managed.side_effect = RuntimeError(
@@ -590,7 +662,48 @@ class ProxmoxInfraHandlerTests(TestCase):
         self.assertIn("already deleted", response["message"])
         mock_clear_forwarding.assert_called_once_with("42", [])
         mock_remove_record.assert_called_once_with(134)
+        mock_mark_deletion.assert_called_once_with("42")
 
+    @patch("portacode.connection.handlers.proxmox_infra._mark_device_deletion_requested")
+    @patch("portacode.connection.handlers.proxmox_infra.get_infra_snapshot", return_value={})
+    @patch("portacode.connection.handlers.proxmox_infra._remove_container_records_for_device", return_value=[])
+    @patch(
+        "portacode.connection.handlers.proxmox_infra._resolve_vmid_for_device_in_proxmox",
+        side_effect=RuntimeError("No managed container found"),
+    )
+    @patch(
+        "portacode.connection.handlers.proxmox_infra._resolve_vmid_for_device",
+        side_effect=RuntimeError("No local record"),
+    )
+    @patch("portacode.connection.handlers.proxmox_infra._get_node_from_config", return_value="pve2")
+    @patch("portacode.connection.handlers.proxmox_infra._connect_proxmox", return_value=object())
+    @patch("portacode.connection.handlers.proxmox_infra._ensure_infra_configured", return_value={"token_value": "x"})
+    def test_remove_container_succeeds_when_provisioning_never_created_a_container(
+        self,
+        _mock_configured,
+        _mock_connect,
+        _mock_get_node,
+        _mock_local_lookup,
+        _mock_proxmox_lookup,
+        mock_remove_records,
+        _mock_snapshot,
+        mock_mark_deletion,
+    ):
+        from portacode.connection.handlers.proxmox_infra import _DeviceLookupError
+
+        _mock_local_lookup.side_effect = _DeviceLookupError("No local record")
+        _mock_proxmox_lookup.side_effect = _DeviceLookupError("No managed container found")
+        handler = RemoveProxmoxContainerHandler(control_channel=MagicMock(), context={})
+
+        response = handler.execute({"child_device_id": "42"})
+
+        self.assertTrue(response["success"])
+        self.assertEqual(response["status"], "deleted")
+        self.assertIsNone(response["ctid"])
+        mock_mark_deletion.assert_called_once_with("42")
+        mock_remove_records.assert_called_once_with("42")
+
+    @patch("portacode.connection.handlers.proxmox_infra._mark_device_deletion_requested")
     @patch("portacode.connection.handlers.proxmox_infra._delete_container")
     @patch("portacode.connection.handlers.proxmox_infra._stop_container")
     @patch("portacode.connection.handlers.proxmox_infra._remove_container_record")
@@ -611,6 +724,7 @@ class ProxmoxInfraHandlerTests(TestCase):
         mock_remove_record,
         mock_stop,
         mock_delete,
+        _mock_mark_deletion,
     ):
         mock_read_record.return_value = {"vmid": 134, "device_id": "42"}
         mock_stop.return_value = ({"status": "stopped", "exitstatus": "OK"}, 0.1)

@@ -64,6 +64,7 @@ from .handlers import (
     StartProxmoxContainerHandler,
     StopProxmoxContainerHandler,
     RemoveProxmoxContainerHandler,
+    ProxmoxResourceAuditHandler,
     CloudflareTunnelSetupHandler,
     CloudflareForwardingHandler,
     ConfigureProxmoxContainerExposePortsHandler,
@@ -574,6 +575,7 @@ class TerminalManager:
         self._command_registry.register(StartProxmoxContainerHandler)
         self._command_registry.register(StopProxmoxContainerHandler)
         self._command_registry.register(RemoveProxmoxContainerHandler)
+        self._command_registry.register(ProxmoxResourceAuditHandler)
         self._command_registry.register(RevertProxmoxInfraHandler)
         self._command_registry.register(CloudflareTunnelSetupHandler)
         self._command_registry.register(CloudflareForwardingHandler)
