@@ -2071,6 +2071,22 @@ Confirms the result of a git commit operation.
 
 ### Client Session Events
 
+### `browser_run`
+
+Runs a bounded Playwright action batch in a persistent, runtime-user-scoped
+Chromium profile. `session_id` is a safe logical name, never a filesystem path.
+The handler accepts at most 30 `steps`; supported operations are `goto`,
+`click`, `fill`, `press`, `select`, `check`, `uncheck`, `wait`, `assert`, and
+`screenshot`. Selectors may use CSS or the semantic `role`/`name`, `label`,
+`text`, and `testid` forms. Optional recording is stored below the runtime
+user's Portacode browser data directory and returned as `video_path`; recording
+bytes are not placed on the control channel.
+
+The `browser_run_response` contains compact per-step outcomes, final URL/title,
+bounded JPEG screenshots encoded as base64, and an optional absolute recording
+path. `success` describes protocol execution while `ok` describes whether all
+browser steps passed, allowing a failure screenshot to reach the caller.
+
 ### <a name="request_client_sessions"></a>`request_client_sessions`
 
 Sent by the device to request the current list of connected client sessions from the server. This is an internal event used during device initialization and reconnection.
