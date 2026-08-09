@@ -1735,6 +1735,12 @@ def _running_portacode_version() -> str:
     return value
 
 
+def _running_portacode_version_is_prerelease() -> bool:
+    """Return whether failed provisioning guests should be retained for debugging."""
+    version = _running_portacode_version().lower()
+    return re.search(r"(?:a|b|rc|dev)\d+", version) is not None
+
+
 def _pinned_portacode_install_command() -> str:
     requirement = shlex.quote(f"portacode=={_running_portacode_version()}")
     return f"{PORTACODE_VENV_DIR}/bin/python -m pip install --upgrade {requirement}"
@@ -2273,13 +2279,16 @@ def _cacheable_bootstrap_steps(package_manager: str) -> List[Dict[str, Any]]:
             "name": "install_playwright_chromium",
             "cmd": (
                 "install -d -m 755 /opt/ms-playwright && "
-                "npm install -g playwright@latest && "
+                "npm install --prefix /opt/portacode-playwright playwright@latest && "
+                "playwright_cli=/opt/portacode-playwright/node_modules/playwright/cli.js && "
+                "test -f \"$playwright_cli\" && "
                 "PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright "
-                "playwright install --with-deps chromium && "
+                "node \"$playwright_cli\" install --with-deps chromium && "
                 "chmod -R a+rX /opt/ms-playwright && "
                 "printf '%s\\n' 'export PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright' "
-                "\"export NODE_PATH=$(npm root -g)\" >/etc/profile.d/portacode_playwright.sh && "
-                "PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright playwright screenshot "
+                "'export NODE_PATH=/opt/portacode-playwright/node_modules' "
+                ">/etc/profile.d/portacode_playwright.sh && "
+                "PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright node \"$playwright_cli\" screenshot "
                 "--browser chromium about:blank /tmp/portacode-playwright-smoke.png && "
                 "test -s /tmp/portacode-playwright-smoke.png && rm /tmp/portacode-playwright-smoke.png"
             ),
@@ -2296,24 +2305,21 @@ def _cacheable_bootstrap_steps(package_manager: str) -> List[Dict[str, Any]]:
             "cmd": (
                 "apk add --no-cache chromium nss freetype harfbuzz ca-certificates "
                 "font-freefont ffmpeg && "
-                "npm install -g playwright@latest && "
-                "install -d -m 755 /opt/ms-playwright && "
-                "set -- $(PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright "
-                "playwright install --dry-run chromium | awk '/Install location:/ {print $3}'); "
-                "chromium_dir=$1; ffmpeg_dir=$2; headless_dir=$3; "
-                "test -n \"$chromium_dir\" && test -n \"$ffmpeg_dir\" && test -n \"$headless_dir\" && "
-                "install -d \"$chromium_dir/chrome-linux64\" "
-                "\"$headless_dir/chrome-headless-shell-linux64\" \"$ffmpeg_dir\" && "
-                "ln -sfn /usr/bin/chromium-browser \"$chromium_dir/chrome-linux64/chrome\" && "
-                "ln -sfn /usr/bin/chromium-browser "
-                "\"$headless_dir/chrome-headless-shell-linux64/chrome-headless-shell\" && "
-                "ln -sfn /usr/bin/ffmpeg \"$ffmpeg_dir/ffmpeg-linux\" && "
-                "chmod -R a+rX /opt/ms-playwright && "
+                "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install --ignore-scripts "
+                "--prefix /opt/portacode-playwright playwright@latest && "
+                "test -f /opt/portacode-playwright/node_modules/playwright/cli.js && "
                 "printf '%s\\n' 'export PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright' "
-                "\"export NODE_PATH=$(npm root -g)\" >/etc/profile.d/portacode_playwright.sh && "
-                "PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright playwright screenshot "
-                "--browser chromium about:blank /tmp/portacode-playwright-smoke.png && "
-                "test -s /tmp/portacode-playwright-smoke.png && rm /tmp/portacode-playwright-smoke.png"
+                "'export NODE_PATH=/opt/portacode-playwright/node_modules' "
+                ">/etc/profile.d/portacode_playwright.sh && "
+                "NODE_PATH=/opt/portacode-playwright/node_modules node -e "
+                "\"const { chromium } = require('playwright'); "
+                "(async () => { const b = await chromium.launch({headless:true,"
+                "executablePath:'/usr/bin/chromium-browser',args:['--no-sandbox']}); "
+                "const p = await b.newPage(); await p.goto('about:blank'); "
+                "await p.screenshot({path:'/tmp/portacode-playwright-smoke.png'}); "
+                "await b.close(); })().catch(e => { console.error(e); process.exit(1); });\" && "
+                "test -s /tmp/portacode-playwright-smoke.png && "
+                "rm /tmp/portacode-playwright-smoke.png"
             ),
             "retries": 0,
         })
@@ -3436,6 +3442,15 @@ def _run_setup_steps(
             res["attempt"] = attempts
             if res["returncode"] != 0:
                 res["error_summary"] = _summarize_error(res)
+                if step.get("name") == "install_playwright_chromium":
+                    logger.error(
+                        "Playwright provisioning step failed vmid=%s returncode=%s "
+                        "stdout=%r stderr=%r",
+                        vmid,
+                        res.get("returncode"),
+                        _clip_command_output(res.get("stdout", ""), 4000),
+                        _clip_command_output(res.get("stderr", ""), 4000),
+                    )
             results.append(res)
             if res["returncode"] == 0:
                 if progress_callback:
@@ -3867,6 +3882,16 @@ def _cleanup_failed_container(
     if provisioning_id and provisioning_id not in description:
         logger.warning(
             "Skipping cleanup for vmid=%s; provisioning marker mismatch", vmid
+        )
+        return
+
+    if _running_portacode_version_is_prerelease():
+        logger.warning(
+            "Retaining failed provisioning container vmid=%s node=%s because "
+            "Portacode %s is a prerelease",
+            vmid,
+            node,
+            _running_portacode_version(),
         )
         return
 

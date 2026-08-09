@@ -22,12 +22,27 @@ from portacode.connection.handlers.proxmox_infra import (
     _reconcile_native_template_registry,
     _resolve_user_data_dir,
     _pinned_portacode_install_command,
+    _running_portacode_version_is_prerelease,
     _require_successful_proxmox_task,
     _sanitize_project_paths,
 )
 
 
 class ProxmoxInfraHandlerTests(TestCase):
+    @patch(
+        "portacode.connection.handlers.proxmox_infra._running_portacode_version",
+        return_value="1.5.28.dev4",
+    )
+    def test_dev_version_retains_failed_provisioning_container(self, _mock_version):
+        self.assertTrue(_running_portacode_version_is_prerelease())
+
+    @patch(
+        "portacode.connection.handlers.proxmox_infra._running_portacode_version",
+        return_value="1.5.28",
+    )
+    def test_stable_version_cleans_failed_provisioning_container(self, _mock_version):
+        self.assertFalse(_running_portacode_version_is_prerelease())
+
     @patch("portacode.connection.handlers.proxmox_infra._allocate_vmid", return_value=144)
     def test_ctid_claim_discards_stale_record_when_proxmox_reports_id_free(self, mock_allocate):
         state = {
@@ -197,11 +212,18 @@ class ProxmoxInfraHandlerTests(TestCase):
             step for step in _cacheable_bootstrap_steps("apk")
             if step["name"] == "install_playwright_chromium"
         )["cmd"]
-        self.assertIn("npm install -g playwright@latest", apt_playwright)
-        self.assertIn("playwright screenshot", apt_playwright)
+        self.assertIn("npm install --prefix /opt/portacode-playwright playwright@latest", apt_playwright)
+        self.assertIn('/opt/portacode-playwright/node_modules/playwright/cli.js', apt_playwright)
+        self.assertIn('node "$playwright_cli" install --with-deps chromium', apt_playwright)
+        self.assertIn('node "$playwright_cli" screenshot', apt_playwright)
         self.assertIn("apk add --no-cache chromium", apk_playwright)
         self.assertIn("/usr/bin/chromium-browser", apk_playwright)
-        self.assertIn("playwright screenshot", apk_playwright)
+        self.assertIn("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install --ignore-scripts", apk_playwright)
+        self.assertIn("--prefix /opt/portacode-playwright playwright@latest", apk_playwright)
+        self.assertIn('/opt/portacode-playwright/node_modules/playwright/cli.js', apk_playwright)
+        self.assertIn("require('playwright')", apk_playwright)
+        self.assertIn("executablePath:'/usr/bin/chromium-browser'", apk_playwright)
+        self.assertIn("p.screenshot({path:'/tmp/portacode-playwright-smoke.png'})", apk_playwright)
 
     def test_legacy_alpine_is_upgraded_before_python_venv_is_created(self):
         steps = _cacheable_bootstrap_steps("apk")

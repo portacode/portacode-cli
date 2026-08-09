@@ -112,7 +112,10 @@ class BrowserRunHandler(AsyncHandler):
         env = dict(os.environ)
         npm = await asyncio.create_subprocess_exec("npm", "root", "-g", stdout=asyncio.subprocess.PIPE)
         npm_out, _ = await npm.communicate()
-        env["NODE_PATH"] = npm_out.decode().strip()
+        env["NODE_PATH"] = os.pathsep.join(filter(None, [
+            "/opt/portacode-playwright/node_modules",
+            npm_out.decode().strip(),
+        ]))
         env.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/ms-playwright")
         argv = wrap_argv_for_user(["node", "-e", _RUNNER], user, login=False)
         lock = _SESSION_LOCKS.setdefault((user, session_id), asyncio.Lock())
