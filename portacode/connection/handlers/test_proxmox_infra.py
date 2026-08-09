@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from portacode.connection.handlers.proxmox_infra import (
     RemoveProxmoxContainerHandler,
+    _build_full_container_summary,
     _build_bootstrap_steps,
     _cacheable_bootstrap_steps,
     _claim_ctid_for_reservation,
@@ -29,6 +30,62 @@ from portacode.connection.handlers.proxmox_infra import (
 
 
 class ProxmoxInfraHandlerTests(TestCase):
+    @patch("portacode.connection.handlers.proxmox_infra._load_provisioning_templates")
+    @patch("portacode.connection.handlers.proxmox_infra._get_node_from_config", return_value="pve")
+    @patch("portacode.connection.handlers.proxmox_infra._connect_proxmox")
+    def test_cached_system_info_inventory_includes_extended_fields_without_repeat_scan(
+        self, mock_connect, _mock_node, mock_templates
+    ):
+        proxmox = MagicMock()
+        node_api = proxmox.nodes.return_value
+        node_api.lxc.get.return_value = [
+            {"vmid": 144, "name": "managed", "status": "running"},
+            {"vmid": 9000, "name": "cache", "status": "stopped"},
+        ]
+        node_api.qemu.get.return_value = []
+        node_api.lxc.return_value.config.get.side_effect = [
+            {
+                "description": "portacode-managed:true;device_id=42;provisioning_id=abc",
+                "rootfs": "local-lvm:vm-144-disk-0,size=32G",
+                "memory": 2048,
+                "cores": 2,
+            },
+            {
+                "description": "portacode-cache:true;cache_id=v2;cache_source=sourcehash",
+                "template": 1,
+                "rootfs": "local-lvm:base-9000-disk-0,size=4G",
+            },
+        ]
+        node_api.status.get.return_value = {
+            "memory": {"total": 16 * 1024**3, "used": 8 * 1024**3},
+            "cpuinfo": {"cores": 8},
+        }
+        node_api.storage.get.return_value = [
+            {"storage": "local-lvm", "type": "lvmthin", "active": 1, "enabled": 1}
+        ]
+        node_api.storage.return_value.status.get.return_value = {
+            "total": 100 * 1024**3, "used": 25 * 1024**3, "avail": 75 * 1024**3,
+        }
+        mock_connect.return_value = proxmox
+        mock_templates.return_value = [{
+            "vmid": 9000, "source_template": "ubuntu.tar.zst", "cache_id": "v2", "status": "ready",
+        }]
+        records = [
+            {"vmid": 144, "device_id": "42", "hostname": "managed", "disk_gib": 32, "ram_mib": 2048, "cpus": 2},
+            {"vmid": 155, "device_id": "43", "hostname": "missing", "disk_gib": 8, "ram_mib": 512, "cpus": 1},
+        ]
+
+        summary = _build_full_container_summary(
+            records,
+            {"token_value": "secret", "node": "pve", "default_storage": "local-lvm", "templates": []},
+        )
+
+        self.assertEqual(summary["inventory_schema_version"], 2)
+        self.assertEqual(summary["containers"][0]["provisioning_id"], "abc")
+        self.assertEqual(summary["templates"][0]["vmid"], "9000")
+        self.assertEqual(summary["missing_containers"][0]["device_id"], "43")
+        self.assertEqual(summary["storages"][0]["available_gib"], 75.0)
+
     @patch(
         "portacode.connection.handlers.proxmox_infra._running_portacode_version",
         return_value="1.5.28.dev4",

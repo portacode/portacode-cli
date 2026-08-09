@@ -449,15 +449,6 @@ Creates a Portacode-managed LXC container, starts it, and bootstraps the Portaco
 *   On success, the device will emit a [`proxmox_container_created`](#proxmox_container_created-event) event that includes the Portacode auth key produced inside the container.
 *   On failure, the device will emit an [`error`](#error) event.
 
-### `proxmox_resource_audit`
-
-Returns a credential-free live inventory for staff infrastructure reconciliation. The response includes node and storage capacity, every LXC/QEMU resource, Portacode description markers, managed Device IDs, cache-template generation/source metadata, linked-clone parent and dependent VMIDs, local records whose Proxmox guests are missing, deletion tombstones, runtime state, and consistency warnings. API tokens and device key material are never included.
-
-**Responses:**
-
-*   On success, the device emits `proxmox_resource_audit` with `resources`, `missing_resources`, `storages`, and host capacity data.
-*   On failure, the device emits an [`error`](#error) event.
-
 ### `start_proxmox_container`
 
 Starts a previously provisioned, Portacode-managed LXC container. Handled by [`StartProxmoxContainerHandler`](./proxmox_infra.py).

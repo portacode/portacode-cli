@@ -1433,6 +1433,18 @@ def _build_full_container_summary(records: List[Dict[str, Any]], config: Dict[st
 
     managed_entries: List[Dict[str, Any]] = []
     unmanaged_entries: List[Dict[str, Any]] = []
+    templates: List[Dict[str, Any]] = []
+    live_vmids: Set[str] = set()
+    template_registry = {
+        str(record.get("vmid")): record
+        for record in _load_provisioning_templates()
+        if record.get("vmid") is not None
+    }
+    source_by_hash = {
+        _cache_source_hash(source): source
+        for source in (config.get("templates") or [])
+        if source
+    }
     allocated_ram = 0.0
     allocated_disk = 0.0
     allocated_cpu = 0.0
@@ -1445,6 +1457,7 @@ def _build_full_container_summary(records: List[Dict[str, Any]], config: Dict[st
             if vmid is None:
                 continue
             vmid_str = str(vmid)
+            live_vmids.add(vmid_str)
             cfg: Dict[str, Any] = {}
             try:
                 cfg = getattr(proxmox.nodes(node), getter)(vmid_str).config.get() or {}
@@ -1452,17 +1465,35 @@ def _build_full_container_summary(records: List[Dict[str, Any]], config: Dict[st
                 logger.debug("Failed to load %s config for %s: %s", kind, vmid_str, exc)
                 cfg = {}
 
+            description = str(cfg.get("description") or "")
             if kind == "lxc" and (
                 _parse_onboot_flag(cfg.get("template"))
-                or PORTACODE_CACHE_MARKER in str(cfg.get("description") or "")
+                or PORTACODE_CACHE_MARKER in description
             ):
                 # Cache template VMIDs are infrastructure, never user-managed
                 # containers. Their logical disk is still reserved capacity.
-                allocated_disk += _pick_container_disk_gib(kind, cfg, entry)
+                disk_gib = _pick_container_disk_gib(kind, cfg, entry)
+                allocated_disk += disk_gib
+                registry_record = template_registry.get(vmid_str) or {}
+                source_hash = _extract_marker_value(description, CACHE_SOURCE_MARKER)
+                templates.append({
+                    "type": kind,
+                    "vmid": vmid_str,
+                    "hostname": entry.get("name") or cfg.get("hostname") or f"lxc-{vmid_str}",
+                    "status": (entry.get("status") or "unknown").lower(),
+                    "storage": _pick_container_storage(kind, cfg, entry),
+                    "disk_gib": disk_gib,
+                    "ram_mib": _pick_container_ram_mib(kind, cfg, entry),
+                    "cpu_share": _pick_container_cpu_share(kind, cfg, entry),
+                    "source_template": registry_record.get("source_template") or source_by_hash.get(source_hash),
+                    "cache_id": registry_record.get("cache_id") or _extract_marker_value(description, CACHE_ID_MARKER),
+                    "cache_status": registry_record.get("status"),
+                    "is_cache_template": PORTACODE_CACHE_MARKER in description,
+                    "created_at": registry_record.get("created_at") or registry_record.get("discovered_at"),
+                })
                 continue
 
             record = record_map.get(vmid_str)
-            description = cfg.get("description") or ""
             managed = bool(record) or MANAGED_MARKER in description
             hostname = entry.get("name") or cfg.get("hostname") or (record.get("hostname") if record else None)
             storage = _pick_container_storage(kind, cfg, entry)
@@ -1484,12 +1515,15 @@ def _build_full_container_summary(records: List[Dict[str, Any]], config: Dict[st
                 "reserve_on_boot": reserve_on_boot,
                 "matches_default_storage": matches_default_storage,
                 "managed": managed,
+                "device_id": (record or {}).get("device_id") or _extract_marker_value(description, DEVICE_ID_MARKER),
+                "provisioning_id": (record or {}).get("provisioning_id") or _extract_marker_value(description, PROVISIONING_ID_MARKER),
+                "rootfs": cfg.get("rootfs"),
             }
 
             if managed:
                 merged = {
                     **base_entry,
-                    "device_id": record.get("device_id") if record else None,
+                    "device_id": base_entry["device_id"],
                     "template": record.get("template") if record else None,
                     "created_at": record.get("created_at") if record else None,
                 }
@@ -1523,13 +1557,36 @@ def _build_full_container_summary(records: List[Dict[str, Any]], config: Dict[st
 
     host_total_disk_gib = None
     available_disk_gib = None
-    if default_storage:
+    storage_summaries: List[Dict[str, Any]] = []
+    try:
+        storage_entries = proxmox.nodes(node).storage.get() or []
+    except Exception as exc:  # pragma: no cover - best effort
+        logger.debug("Unable to list Proxmox storages: %s", exc)
+        storage_entries = []
+    for storage in storage_entries:
+        storage_name = storage.get("storage")
         try:
-            storage_status = proxmox.nodes(node).storage(default_storage).status.get()
-            host_total_disk_gib = _bytes_to_gib(storage_status.get("total"))
-            available_disk_gib = _bytes_to_gib(storage_status.get("avail"))
+            storage_status = proxmox.nodes(node).storage(storage_name).status.get() or {}
         except Exception as exc:  # pragma: no cover - best effort
-            logger.debug("Unable to read storage status for %s: %s", default_storage, exc)
+            storage_status = {}
+            storage_error = str(exc)
+        else:
+            storage_error = None
+        storage_summary = {
+            "storage": storage_name,
+            "type": storage.get("type"),
+            "active": storage.get("active"),
+            "enabled": storage.get("enabled"),
+            "content": storage.get("content"),
+            "total_gib": _bytes_to_gib(storage_status.get("total")),
+            "used_gib": _bytes_to_gib(storage_status.get("used")),
+            "available_gib": _bytes_to_gib(storage_status.get("avail")),
+            "error": storage_error,
+        }
+        storage_summaries.append(storage_summary)
+        if storage_name == default_storage:
+            host_total_disk_gib = storage_summary["total_gib"]
+            available_disk_gib = storage_summary["available_gib"]
 
     summary = base_summary.copy()
     summary["containers"] = managed_entries
@@ -1538,6 +1595,22 @@ def _build_full_container_summary(records: List[Dict[str, Any]], config: Dict[st
     summary["total_disk_gib"] = int(sum(entry.get("disk_gib") or 0 for entry in managed_entries))
     summary["total_cpu_share"] = round(sum(entry.get("cpu_share") or 0 for entry in managed_entries), 2)
     summary["unmanaged_containers"] = unmanaged_entries
+    summary["templates"] = templates
+    summary["missing_containers"] = [
+        {
+            "vmid": vmid,
+            "device_id": str(record.get("device_id") or "") or None,
+            "hostname": record.get("hostname"),
+            "created_at": record.get("created_at"),
+            "template": record.get("template"),
+            "warning": "Local Portacode metadata exists but the Proxmox resource is absent",
+        }
+        for vmid, record in record_map.items()
+        if vmid not in live_vmids
+    ]
+    summary["storages"] = storage_summaries
+    summary["inventory_schema_version"] = 2
+    summary["inventory_updated_at"] = _current_time_iso()
     summary["allocated_ram_mib"] = round(allocated_ram, 2)
     summary["allocated_disk_gib"] = round(allocated_disk, 2)
     summary["allocated_cpu_share"] = round(allocated_cpu, 2)
@@ -5017,177 +5090,6 @@ class RemoveProxmoxContainerHandler(SyncHandler):
             "request_id": request_id,
             "infra": infra,
         }
-
-
-def _description_markers(description: str) -> Dict[str, str]:
-    markers: Dict[str, str] = {}
-    for part in str(description or "").split(";"):
-        part = part.strip()
-        if not part:
-            continue
-        if "=" in part:
-            key, value = part.split("=", 1)
-            markers[key.strip()] = value.strip()
-        elif ":" in part:
-            key, value = part.split(":", 1)
-            markers[key.strip()] = value.strip()
-    return markers
-
-
-def _linked_clone_parent_vmid(rootfs: Any) -> Optional[int]:
-    match = re.search(r"(?:^|:)base-(\d+)-disk-\d+", str(rootfs or ""))
-    return int(match.group(1)) if match else None
-
-
-def build_proxmox_resource_audit() -> Dict[str, Any]:
-    """Return a credential-free live inventory for staff-side reconciliation."""
-    config = _ensure_infra_configured()
-    proxmox = _connect_proxmox(config)
-    node = _get_node_from_config(config)
-    local_records = {str(record.get("vmid")): record for record in _load_managed_container_records()}
-    template_registry = _load_provisioning_templates()
-    registry_by_vmid = {str(record.get("vmid")): record for record in template_registry}
-    tombstones = _load_deletion_tombstones()
-    source_by_hash = {
-        _cache_source_hash(source): source for source in (config.get("templates") or []) if source
-    }
-    resources: List[Dict[str, Any]] = []
-
-    for kind, getter in (("lxc", "lxc"), ("qemu", "qemu")):
-        for summary in getattr(proxmox.nodes(node), getter).get() or []:
-            vmid = str(summary.get("vmid"))
-            try:
-                resource_config = getattr(proxmox.nodes(node), getter)(vmid).config.get() or {}
-            except Exception as exc:
-                resource_config = {}
-                config_error = str(exc)
-            else:
-                config_error = None
-            description = str(resource_config.get("description") or "")
-            markers = _description_markers(description)
-            is_template = kind == "lxc" and _parse_onboot_flag(resource_config.get("template"))
-            is_cache = PORTACODE_CACHE_MARKER in description
-            is_managed = MANAGED_MARKER in description
-            device_id = markers.get(DEVICE_ID_MARKER.rstrip("="))
-            parent_vmid = _linked_clone_parent_vmid(resource_config.get("rootfs")) if kind == "lxc" else None
-            registry_record = registry_by_vmid.get(vmid) or {}
-            local_record = local_records.get(vmid) or {}
-            warnings: List[str] = []
-            if is_managed and not device_id:
-                warnings.append("Managed marker has no device_id")
-            if device_id and device_id in tombstones:
-                warnings.append("Deletion requested but Proxmox resource still exists")
-            if is_managed and not local_record:
-                warnings.append("Managed resource has no local metadata record")
-            if is_cache and not registry_record:
-                warnings.append("Cache template is missing from the template registry")
-            if registry_record.get("status") == "stale" or (
-                is_cache and markers.get("cache_id") != PROVISIONING_CACHE_ID
-            ):
-                warnings.append("Cache template is stale")
-            if config_error:
-                warnings.append("Unable to read Proxmox resource configuration")
-            resources.append({
-                "kind": kind,
-                "vmid": vmid,
-                "name": summary.get("name") or resource_config.get("hostname") or f"{kind}-{vmid}",
-                "status": str(summary.get("status") or "unknown").lower(),
-                "is_template": is_template,
-                "is_cache_template": is_cache,
-                "is_portacode_managed": is_managed or is_cache,
-                "device_id": device_id,
-                "provisioning_id": markers.get("provisioning_id"),
-                "deletion_requested_at": tombstones.get(str(device_id)) if device_id else None,
-                "parent_template_vmid": str(parent_vmid) if parent_vmid is not None else None,
-                "description": description,
-                "markers": markers,
-                "rootfs": resource_config.get("rootfs"),
-                "storage": _pick_container_storage(kind, resource_config, summary),
-                "disk_gib": _pick_container_disk_gib(kind, resource_config, summary),
-                "ram_mib": _pick_container_ram_mib(kind, resource_config, summary),
-                "cpu_share": _pick_container_cpu_share(kind, resource_config, summary),
-                "onboot": _parse_onboot_flag(resource_config.get("onboot")),
-                "created_at": local_record.get("created_at") or registry_record.get("created_at"),
-                "source_template": registry_record.get("source_template") or source_by_hash.get(markers.get("cache_source")),
-                "cache_id": registry_record.get("cache_id") or markers.get("cache_id"),
-                "cache_status": registry_record.get("status"),
-                "local_record": {
-                    key: local_record.get(key)
-                    for key in ("device_id", "hostname", "created_at", "template", "status", "provisioning_id")
-                    if local_record.get(key) is not None
-                },
-                "warnings": warnings,
-                "config_error": config_error,
-            })
-
-    live_vmids = {resource["vmid"] for resource in resources}
-    missing_resources = []
-    for vmid, record in local_records.items():
-        if vmid in live_vmids:
-            continue
-        missing_resources.append({
-            "vmid": vmid,
-            "device_id": str(record.get("device_id") or "") or None,
-            "hostname": record.get("hostname"),
-            "created_at": record.get("created_at"),
-            "template": record.get("template"),
-            "warning": "Local Portacode metadata exists but the Proxmox resource is absent",
-        })
-
-    dependents: Dict[str, List[str]] = {}
-    for resource in resources:
-        parent_vmid = resource.get("parent_template_vmid")
-        if parent_vmid:
-            dependents.setdefault(str(parent_vmid), []).append(resource["vmid"])
-    for resource in resources:
-        resource["dependent_vmids"] = dependents.get(resource["vmid"], [])
-
-    node_status = proxmox.nodes(node).status.get() or {}
-    storages = []
-    for storage in proxmox.nodes(node).storage.get() or []:
-        storage_name = storage.get("storage")
-        try:
-            status = proxmox.nodes(node).storage(storage_name).status.get() or {}
-        except Exception as exc:
-            status = {"error": str(exc)}
-        storages.append({
-            "storage": storage_name,
-            "type": storage.get("type"),
-            "active": storage.get("active"),
-            "enabled": storage.get("enabled"),
-            "content": storage.get("content"),
-            "total_gib": _bytes_to_gib(status.get("total")),
-            "used_gib": _bytes_to_gib(status.get("used")),
-            "available_gib": _bytes_to_gib(status.get("avail")),
-            "error": status.get("error"),
-        })
-    return {
-        "event": "proxmox_resource_audit",
-        "success": True,
-        "generated_at": _current_time_iso(),
-        "node": node,
-        "cache_id": PROVISIONING_CACHE_ID,
-        "host": {
-            "status": node_status.get("status") or "online",
-            "uptime_s": node_status.get("uptime"),
-            "cpu_fraction": node_status.get("cpu"),
-            "cpu_cores": (node_status.get("cpuinfo") or {}).get("cores"),
-            "memory_total_mib": _bytes_to_mib((node_status.get("memory") or {}).get("total")),
-            "memory_used_mib": _bytes_to_mib((node_status.get("memory") or {}).get("used")),
-        },
-        "storages": storages,
-        "resources": resources,
-        "missing_resources": missing_resources,
-    }
-
-
-class ProxmoxResourceAuditHandler(SyncHandler):
-    @property
-    def command_name(self) -> str:
-        return "proxmox_resource_audit"
-
-    def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
-        return build_proxmox_resource_audit()
 
 
 class ConfigureProxmoxInfraHandler(SyncHandler):
