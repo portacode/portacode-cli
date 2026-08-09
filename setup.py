@@ -10,12 +10,26 @@ setup(
     name=PACKAGE_NAME,
     use_scm_version=True,
     setup_requires=['setuptools_scm'],
-    description="Portacode CLI client and SDK",
+    description="Connect real machines to the Portacode AI development environment",
     long_description=README,
     long_description_content_type="text/markdown",
     author="Meena Erian",
     author_email="hi@menas.pro",
     url="https://github.com/portacode/portacode",
+    project_urls={
+        "Product": "https://portacode.com/",
+        "Documentation": "https://portacode.com/docs/pair-device/",
+        "Source": "https://github.com/portacode/portacode",
+        "Issues": "https://github.com/portacode/portacode/issues",
+    },
+    keywords=[
+        "ai coding agent",
+        "development environment",
+        "remote development",
+        "self-hosting",
+        "devops",
+        "proxmox",
+    ],
     packages=find_packages(exclude=("tests", "server")),
     package_data={
         "portacode": [

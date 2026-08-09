@@ -60,8 +60,7 @@ workshop_fleet/
 
 You can get one pairing code from the dashboard at [https://portacode.com](https://portacode.com) and use it to pair all containers in one step, and later you can tranfer each one to a student.
 
-1. Sign in to the dashboard and click **Pair Device**:  
-   ![Pair Device button](https://raw.githubusercontent.com/portacode/portacode/master/docs/images/pair-device-button.png)
+1. Sign in to the dashboard and click **Pair Device**.
 2. A four-digit code appears (valid for 15 minutes). This code only authorizes the request—you still approve each seat/device/container on the dashboard after the container connects.
 
 Keep the code handy; you will export it before starting Docker Compose.
@@ -97,18 +96,15 @@ Each service is named `student-01`, `student-02`, … `student-10`. During the f
 
 Portacode refers to each container as a **device**, even though you may call them seats in class. Approving them keeps ownership under the instructor account until you transfer control.
 
-1. Within a few seconds of running `docker compose up`, every device appears on your dashboard as “Workshop Seat 01”, “Workshop Seat 02”, etc.  
-   ![Pairing request card](https://raw.githubusercontent.com/portacode/portacode/master/docs/images/pairing-request.png)
+1. Within a few seconds of running `docker compose up`, every device appears on your dashboard as “Workshop Seat 01”, “Workshop Seat 02”, etc.
 2. Click **Approve** on each card. The device remains on your dashboard (under your account) until you hand it off to a student.
 
 ## Transfer Each Device to a Student
 
 After approval, instruct students to sign in at [https://portacode.com](https://portacode.com) and follow these steps so they own their seat:
 
-1. On the dashboard, hover or tap the device and select the **Transfer Ownership** icon.  
-   ![Device transfer button highlighted on the Portacode dashboard](https://raw.githubusercontent.com/portacode/portacode/master/docs/images/device-transfer-button.png)
-2. Enter the student’s email address in the modal and click **Send invite**.  
-   ![Device transfer modal showing recipient email field](https://raw.githubusercontent.com/portacode/portacode/master/docs/images/device-transfer-modal.png)
+1. On the dashboard, open the device actions and select **Transfer Ownership**.
+2. Enter the student’s email address and send the invitation.
 3. Once the student accepts the invitation, the device moves to their account. You still retain filesystem access to `examples/workshop_fleet/data/student-XX/` on the host, which contains their workspace and Portacode data for grading or troubleshooting.
 
 > 🔍 **Need to review submissions?** Explore `data/student-XX/workspace/` directly from the host. Every edit students make inside Portacode is persisted there.
@@ -117,7 +113,6 @@ After approval, instruct students to sign in at [https://portacode.com](https://
 
 - `/root/workspace` contains their editable copy of `initial_content/`. The helper script only copies files that do not already exist, so restarts never overwrite progress.
 - `/root/workspace/instructions` mirrors the host `instructions/` folder. You can update Markdown live, but the mount is read-only for students.
-![Stodent Portacode IDE Desktop View](https://raw.githubusercontent.com/portacode/portacode/master/docs/images/student-workspace.png)
 - Portacode keys live in `/root/.local/share/portacode`, mounted under `data/student-XX/` on the host. Restarting or rebuilding containers reuses these keys, so no new pairing codes are needed unless you delete the folder.
 
 ## Customize for Your Class

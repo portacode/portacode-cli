@@ -1,254 +1,132 @@
 # Portacode
 
-**An AI-first, mobile-first IDE and admin tool, made with love and passion by software engineers, for software engineers.**
+**Build it. Own it. Take it anywhere.**
 
-Portacode transforms any device with python into a remotely accessible development environment. Access your home lab, server or even embedded system chip from your phone, code on your desktop or your smartphone from anywhere, or help a colleague debug their server - all through a beautiful web interface designed for the modern developer.
+Portacode is an AI-powered builder and mobile-first development environment that works on real Linux machines. Describe what you want to build, let Portacode work through the implementation on a machine you control, and keep the result as ordinary source code, data, containers, and configuration.
 
-## ✨ Why Portacode?
+It combines an AI coding agent with the tools developers expect from a real machine: a terminal, files, Git, diffs, processes, and deploys. Use hardware you already have, connect a VPS or homelab, deploy to supported infrastructure, and move the project when your needs change.
 
-- **🤖 AI-First**: Built from the ground up with AI integration in mind
-- **📱 Mobile-First**: Code and administrate from your phone or tablet
-- **🌍 Global Access**: Connect to your devices from anywhere with internet
-- **🔐 Secure**: HTTPS encrypted with RSA key authentication
-- **⚡ Fast Setup**: Get connected in under 60 seconds
-- **🔄 Always Connected**: Automatic reconnection and persistent service options
-- **🆓 Free Account**: Create your account and start connecting immediately
-- **🖥️ Cross-Platform**: Works on Windows, macOS, and Linux
+[Get started](https://portacode.com/accounts/signup/) · [Open Portacode](https://portacode.com/) · [Android app](https://play.google.com/store/apps/details?id=com.portacode.app) · [Report an issue](https://github.com/portacode/portacode/issues)
 
-## 🚀 Quick Start
+## Why Portacode
 
-### 1. Install Portacode
+- **You own the result.** Projects remain ordinary files on an ordinary machine, not artifacts trapped in a proprietary runtime.
+- **Real tools, not a preview sandbox.** Work with a real terminal, filesystem, Git repository, services, containers, databases, and deploys.
+- **Your infrastructure is a choice.** Connect an existing machine, use managed capacity, or run projects on your own supported infrastructure.
+- **Leaving is supported.** Back up, transfer, or move a project instead of rebuilding it around a platform-specific format.
+- **AI changes stay reviewable.** Inspect diffs and project state while the agent works, and decide what it is allowed to change.
+- **Built for mobile as well as desktop.** Browse a project, review changes, use a terminal, and respond to work without waiting to get back to a desk.
+- **No approved-stack list.** If your language, framework, database, or tool runs on the underlying Linux machine, it can be part of your project.
+
+## What You Can Do
+
+Portacode supports more than remote terminal access. From the same browser-based workspace you can:
+
+- ask an AI agent to create, change, debug, and deploy software;
+- inspect files, branches, Git status, and line-by-line diffs;
+- work directly in persistent terminal sessions;
+- connect and switch between your own machines;
+- provision clean environments from reusable deployment templates;
+- run repeatable build, test, deployment, and runbook workflows from YAML;
+- expose services through HTTPS and custom domains on supported infrastructure;
+- manage projects from a phone, tablet, or desktop.
+
+The product evolves quickly. The live [Portacode website](https://portacode.com/) and [technical guides](#guides) are the source of truth for currently available integrations, templates, limits, and infrastructure options.
+
+## Start Building
+
+You do not need to prepare a machine before trying Portacode. Start at [portacode.com](https://portacode.com/), describe the outcome you want, and choose where the project should run.
+
+To bring an existing machine into Portacode, pair it once using the dashboard and the CLI below.
+
+## Connect Your Own Machine
+
+Portacode's Python package is the device-side CLI and agent. It connects an existing Linux/Python-capable machine to your Portacode account so the web workspace can work with its projects and developer tools.
+
+### Recommended Linux setup
+
+1. Sign in to [Portacode](https://portacode.com/) and select **Pair Device**.
+2. Run the activation command shown there on the target machine. It installs Portacode in a dedicated virtual environment, pairs the device, and configures its persistent service.
+3. Approve the pairing request in the dashboard.
+
+The command has this form; use the short-lived code displayed in your own dashboard:
 
 ```bash
-pip install portacode
+curl -fsSL https://portacode.com/static/activate_portacode.sh \
+  | bash -s -- --pairing-code YOUR_CODE
 ```
 
-### 2. Connect Your Device
+Review the downloaded script before running it if that is required by your environment. See the [pairing guide](https://portacode.com/docs/pair-device/) for supported distributions, a fully manual installation, and Proxmox-specific setup.
+
+### Manual CLI setup
+
+If you already have a suitable Python environment:
 
 ```bash
-portacode connect
+python -m pip install --upgrade portacode
+portacode connect --pairing-code YOUR_CODE \
+  --device-name "My Linux Device" \
+  --project-path /absolute/path/to/project
 ```
 
-Follow the on-screen instructions to:
-- Visit [https://portacode.com](https://portacode.com)
-- Create your free account
-- Add your device using the generated key
-- Start coding and administrating!
+Approve the request in the dashboard. The device stores its identity locally and reuses it for later connections. For an always-on connection, install the supervised service after pairing:
 
-### 3. Access Your Development Environment
-
-Once connected, you can:
-- Open terminal sessions from the web dashboard
-- Execute commands remotely
-- Monitor system status
-- Access your development environment from any device
-
-Want to see Portacode running inside containers or powering classrooms? Browse the [`examples/` directory](https://github.com/portacode/portacode/tree/master/examples) (also bundled in the PyPI source) for copy-paste Docker Compose setups ranging from a single-device sandbox to a ten-seat workshop fleet.
-
-## 🔑 Pair Devices with Zero-Touch Codes
-
-The fastest way to bring a new machine online is with a short-lived pairing code:
-
-1. Log in to [https://portacode.com](https://portacode.com) and press **Pair Device** on the dashboard:  
-   ![Pair Device button](https://raw.githubusercontent.com/portacode/portacode/master/docs/images/pair-device-button.png)
-2. A four-digit code appears (valid for 15 minutes). This code only authorizes a pairing **request**—no device can reach your account until you approve it.
-3. On the device, run Portacode with the code:
-   ```bash
-   PORTACODE_PAIRING_CODE=1234 portacode connect \
-     --device-name "My Laptop" \
-     --project-path /srv/project-one \
-     --project-path /srv/project-two
-   ```
-   - `--device-name` (or `PORTACODE_DEVICE_NAME`) pre-fills the friendly label shown in the dashboard.
-   - Repeat `--project-path /abs/path` to register up to ten Projects automatically once the request is approved.
-   - Automating inside Docker? Export your own `PORTACODE_PROJECT_PATHS=/srv/a:/srv/b` and convert it into repeated `--project-path` switches before invoking the CLI—see `portacode_for_school/persistent_workspace/entrypoint.sh` for a reference implementation.
-4. Because the device has no fingerprint yet, the CLI bootstraps an in-memory keypair and announces a pending request to the dashboard. You immediately see the card with the supplied metadata:  
-   ![Pairing request card](https://raw.githubusercontent.com/portacode/portacode/master/docs/images/pairing-request.png)
-5. Click **Approve**. The CLI persists the keypair on disk and transitions into a normal authenticated connection. Future `portacode connect` runs reuse the stored RSA keys—no additional codes required unless you revoke the device.
-
-Need to pair multiple machines at once? A single pairing code can be reused concurrently: every device that launches `portacode connect` with that code shows up as its own approval card until you accept or decline it.
-
-This workflow works great for headless setups and containers: export the environment variables, run `portacode connect --non-interactive`, and finish the approval from the dashboard.
-
-## 💡 Use Cases
-
-- **Remote Development**: Code, build, and debug from anywhere - even your phone
-- **Server Administration**: 24/7 server access with persistent service installation
-- **Mobile Development**: Full IDE experience on mobile devices
-
-## 🔧 Essential Commands
-
-### Basic Usage
 ```bash
-# Start a connection (runs until closed)
-portacode connect
-
-
-# Check version
-portacode --version
-
-# Install a specific version (restarts the service)
-portacode setversion 1.2.3
-
-# Upgrade to the latest version from PyPI
-portacode setversion latest
-
-# Get help
-portacode --help
+portacode service install
+portacode service status
 ```
 
-### Service Management
-```bash
-# First, authenticate your device
-portacode connect
+System-wide service installation may require elevated privileges. Run `portacode --help`, `portacode connect --help`, or `portacode service --help` for the options supported by the installed version.
 
-# For system services, install package system-wide
-sudo pip install portacode --system
+## Automation and Deployments
 
-# Install persistent service (auto-start on boot)
-sudo portacode service install
+A `portafile.yaml` can describe a repeatable workflow for a new disposable environment or an existing device. Depending on the workflow, it can select a base environment, request resources, create project paths, collect inputs, run ordered build/test/deploy steps, expose services, and define success or failure behavior.
 
-# Check service status (use -v for verbose debugging)
-sudo portacode service status
-sudo portacode service status -v
+This keeps automation portable and reviewable alongside the project while Portacode handles orchestration and status reporting. The schema is intentionally documented on the live site because it gains capabilities more frequently than the CLI README changes.
 
-# Stop/remove the service
-sudo portacode service stop
-sudo portacode service uninstall
-```
+See the [CI/CD and `portafile.yaml` reference](https://portacode.com/portacode-cicd-intro/) or browse [one-click deployment templates](https://portacode.com/one-click-deployment-templates/).
 
-## 🌐 Web Dashboard
+## Your Infrastructure
 
-Access your connected devices at [https://portacode.com](https://portacode.com)
+Existing Linux machines can be paired directly. For self-hosted provisioning, a supported Proxmox node can become Portacode infrastructure, allowing projects and automation to create isolated environments against the capacity you control. Services can be connected to custom domains through the supported Cloudflare Tunnel flow.
 
-**Current Features:**
-- Real-time terminal access
-- System monitoring
-- Device management
-- Multi-device switching
-- Secure authentication
+- [Set up a Proxmox infrastructure node](https://portacode.com/docs/proxmox-infra-node-setup/)
+- [Connect a domain](https://portacode.com/docs/cloudflare-domain-tunnel-setup/)
+- [Read current usage limits](https://portacode.com/usage-limits/)
 
-**Coming Soon:**
-- AI-powered code assistance
-- Mobile-optimized IDE interface
-- File management and editing
-- Collaborative development tools
+## Security and Control
 
-## 🔐 Security
+Each paired device has its own cryptographic identity. The private key is stored on the device, connections are encrypted in transit, and access can be revoked from Portacode. Pairing codes are short-lived and a new device still requires approval in the dashboard.
 
-- **RSA Key Authentication**: Each device gets a unique RSA key pair
-- **HTTPS Encrypted**: All communication is encrypted in transit
-- **No Passwords**: Key-based authentication eliminates password risks
-- **Revocable Access**: Remove devices instantly from the web dashboard
-- **Local Key Storage**: Private keys never leave your device
+AI work is designed around visible project state and reviewable diffs. As with any remote administration or coding-agent tool, connect only machines and project paths you intend Portacode to access, review proposed changes, and use appropriate operating-system permissions and backups.
 
-## 🆘 Troubleshooting
+## Identity Storage and Containers
 
-### Connection Issues
-```bash
-# Check if another connection is running
-portacode connect
+The CLI uses the operating system's application-data directory (through [`platformdirs`](https://pypi.org/project/platformdirs/)) and stores its device identity under `portacode/keys/`. Typical locations are:
 
-# View service logs
-sudo portacode service status --verbose
-```
+- Linux: `~/.local/share/portacode/keys/`
+- macOS: `~/Library/Application Support/portacode/keys/`
+- Windows: `%APPDATA%\portacode\keys\`
 
-### Service Installation Issues
-```bash
-# First authenticate your device
-portacode connect
+When running the CLI in a container, persist the relevant application-data directory so the container retains its device identity across rebuilds. The examples demonstrate the pattern:
 
-# If service commands fail, ensure system-wide installation
-sudo pip install portacode --system
+- [`examples/simple_device`](https://github.com/portacode/portacode/tree/master/examples/simple_device) — one container with a persistent workspace and identity
+- [`examples/workshop_fleet`](https://github.com/portacode/portacode/tree/master/examples/workshop_fleet) — a multi-seat lab with separate persistent workspaces
 
-# Then try service installation again
-sudo portacode service install
+## Guides
 
-# Use verbose status to debug connection issues
-sudo portacode service status -v
-```
+- [Pair an existing device](https://portacode.com/docs/pair-device/)
+- [CI/CD and `portafile.yaml`](https://portacode.com/portacode-cicd-intro/)
+- [One-click deployment templates](https://portacode.com/one-click-deployment-templates/)
+- [Self-host on Proxmox](https://portacode.com/docs/proxmox-infra-node-setup/)
+- [Connect a custom domain](https://portacode.com/docs/cloudflare-domain-tunnel-setup/)
+- [Current usage limits](https://portacode.com/usage-limits/)
 
-### Clipboard Issues (Linux)
-```bash
-# Install clipboard support
-sudo apt-get install xclip
-```
+## Contributing and Support
 
-### Key Management
-Portacode follows the OS-specific *user data* directory (via [`platformdirs`](https://pypi.org/project/platformdirs/)) and keeps its identity in `portacode/keys/`:
-- **Linux**: `~/.local/share/portacode/keys/`
-- **macOS**: `~/Library/Application Support/portacode/keys/`
-- **Windows**: `%APPDATA%\portacode\keys\`
+Bug reports, focused fixes, and documentation improvements are welcome. Open an [issue](https://github.com/portacode/portacode/issues) or a pull request in this repository.
 
-When `PORTACODE_PAIRING_CODE` is set, the CLI generates an in-memory keypair, waits for dashboard approval, and only then writes the files to this directory. If that folder disappears, the CLI will create a fresh identity next time it runs.
+For product support, email [support@portacode.com](mailto:support@portacode.com).
 
-#### Persisting Keys in Containers
-Docker images (including the simple `python:3.11-slim` example that runs Portacode as `root`) store the data inside `/root/.local/share/portacode`. Bind-mount that path or override `XDG_DATA_HOME` so the keys survive container restarts:
+## License
 
-```yaml
-services:
-  device-01:
-    build: .
-    environment:
-      PORTACODE_PAIRING_CODE: "${PORTACODE_PAIRING_CODE:-}"
-    volumes:
-      - ./data/device-01/workspace:/root/workspace
-      - ./data/device-01/.local/share/portacode:/root/.local/share/portacode  # persists device keys
-```
-
-Alternatively, set `XDG_DATA_HOME=/root/.portacode` before running `portacode connect` and mount that directory from the host. The rule of thumb: **persist whichever folder contains `.local/share/portacode/keys/`** so your device fingerprint sticks around.
-
-#### Minimal Docker Example
-If you want a plug-and-play container, check the `examples/simple_device/` folder that ships with this repo and the PyPI source distribution. It contains a tiny `Dockerfile` and `docker-compose.yaml` you can copy as-is. The Dockerfile installs `git` before `pip install portacode` so GitPython can interact with repositories—remember to do the same in your own images if you expect to work inside version-controlled projects.
-
-The accompanying Compose file demonstrates how to:
-- run `portacode connect --non-interactive` with a predefined `--device-name` and `--project-path`
-- pass `PORTACODE_PAIRING_CODE` via environment variables
-- bind-mount your workspace plus `/root/.local/share/portacode` for key persistence
-
-Together, those 10 lines illustrate the complete flow for remotely accessing a Docker-hosted machine with Portacode.
-
-#### Workshop Fleet Example
-Training a group? `examples/workshop_fleet/` spins up ten identical containers—one per student—with their own workspace bind mounts plus a shared read-only `instructions/` folder. The Dockerfile in that folder copies everything from `initial_content/` into the image (`COPY initial_content/ /opt/initial_content/`), and the compose command seeds each student workspace on boot via `cp -an /opt/initial_content/. /root/workspace/`. That means:
-- Instructors drop starter code into `initial_content/` before `docker compose up` and every container gets the same seed files without overwriting student changes after the first sync.
-- The host `instructions/` directory is mounted at `/root/workspace/instructions` in **read-only** mode, so you can update agendas or hints live while students can only view them.
-- Each seat persists its Portacode identity in `data/student-XX/.local/share/portacode`, so reconnecting after a restart does not need new pairing codes.
-
-See the full walkthrough and assets in [`examples/workshop_fleet/`](https://github.com/portacode/portacode/tree/master/examples/workshop_fleet), which is also shipped inside the PyPI source tarball for offline access.
-
-## 🌱 Early Stage Project
-
-**Portacode is a young project with big dreams.** We're building the future of remote development and mobile-first coding experiences. As a new project, we're actively seeking:
-
-- **👥 Community Feedback**: Does this solve a real problem for you?
-- **🤝 Contributors**: Help us build the IDE of the future
-- **📢 Early Adopters**: Try it out and let us know what you think
-- **💡 Feature Ideas**: What would make your remote development workflow better?
-
-**Your support matters!** Whether you contribute code, report bugs, share ideas, or simply let us know that you find value in what we're building - every bit of feedback helps us decide whether to continue investing in this vision or focus on other projects.
-
-## 📞 Get In Touch
-
-- **Email**: hi@menas.pro
-- **Support**: support@portacode.com
-- **GitHub**: [https://github.com/portacode/portacode](https://github.com/portacode/portacode)
-
-## 🤝 Contributing
-
-We welcome all forms of contribution:
-- 🐛 **Bug Reports**: Found something broken? Let us know!
-- ✨ **Feature Requests**: What would make Portacode better for you?
-- 📖 **Documentation**: Help others get started
-- 💻 **Code Contributions**: Help us build the future of remote development
-- 💬 **Feedback**: Tell us if you find this useful!
-
-Check out our [GitHub repository](https://github.com/portacode/portacode) to get started.
-
-## 📄 License
-
-
----
-
-**Get started today**: `pip install portacode && portacode connect`
-
-*Built with ❤️ and ☕ by passionate software engineers* 
