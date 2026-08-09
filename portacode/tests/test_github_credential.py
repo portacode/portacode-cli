@@ -95,10 +95,20 @@ def test_configure_git_uses_absolute_helper_path(monkeypatch):
     github_credential.configure_git()
 
     assert observed[0] == (
-        ["git", "config", "--global", "credential.https://github.com.helper", helper],
+        [
+            "git", "config", "--global", "--replace-all",
+            "credential.https://github.com.helper", "",
+        ],
         True,
     )
     assert observed[1] == (
+        [
+            "git", "config", "--global", "--add",
+            "credential.https://github.com.helper", helper,
+        ],
+        True,
+    )
+    assert observed[2] == (
         ["git", "config", "--global", "credential.https://github.com.useHttpPath", "true"],
         True,
     )

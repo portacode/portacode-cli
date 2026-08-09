@@ -105,9 +105,25 @@ def configure_git() -> None:
 
     runtime_user = get_default_runtime_user()
     helper = _helper_command()
+    # Credential helpers are cumulative. Reset helpers inherited from broader
+    # credential sections so a cached credential for another GitHub account
+    # cannot satisfy the request before Portacode sees it.
     subprocess.run(
         wrap_argv_for_user(
-            ["git", "config", "--global", "credential.https://github.com.helper", helper],
+            [
+                "git", "config", "--global", "--replace-all",
+                "credential.https://github.com.helper", "",
+            ],
+            runtime_user,
+        ),
+        check=True,
+    )
+    subprocess.run(
+        wrap_argv_for_user(
+            [
+                "git", "config", "--global", "--add",
+                "credential.https://github.com.helper", helper,
+            ],
             runtime_user,
         ),
         check=True,
