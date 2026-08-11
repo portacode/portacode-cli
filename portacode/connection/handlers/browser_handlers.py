@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from .base import AsyncHandler
+from .chunked_content import create_chunked_response, should_chunk_content
 from .runtime_user import get_default_runtime_user, get_runtime_user_home, mkdir_with_owner, wrap_argv_for_user
 
 
@@ -21,6 +22,7 @@ _WORKERS_LOCK: asyncio.Lock | None = None
 _NODE_PATH: str | None = None
 _NODE_PATH_LOCK: asyncio.Lock | None = None
 _WORKER_IDLE_SECONDS = 300.0
+_MAX_WORKER_RESPONSE_BYTES = 16 * 1024 * 1024
 logger = logging.getLogger(__name__)
 _RUNNER = r"""
 const fs = require('fs');
@@ -33,7 +35,7 @@ const locator = (p,s) => {
   else if (s.text) l=p.getByText(s.text, {exact:!!s.exact});
   else if (s.testid) l=p.getByTestId(s.testid);
   else l=p.locator(s.css || s.selector);
-  return s.nth === undefined ? l : l.nth(s.nth);
+  return s.nth == null ? l : l.nth(s.nth);
 };
 let context=null, page=null;
 const closeContext = async () => {
@@ -92,11 +94,15 @@ const run = async cfg => {
  return out;
 };
 const rl=readline.createInterface({input:process.stdin,crlfDelay:Infinity});
+const writeResult = out => {
+ const payload=JSON.stringify(out);
+ process.stdout.write(Buffer.byteLength(payload,'utf8')+'\n'+payload);
+};
 rl.on('line', line => {
  rl.pause();
  (async()=>run(JSON.parse(line)))()
-  .then(out=>process.stdout.write(JSON.stringify(out)+'\n'))
-  .catch(e=>process.stdout.write(JSON.stringify({ok:false,error:String(e)})+'\n'))
+  .then(writeResult)
+  .catch(e=>writeResult({ok:false,error:String(e)}))
   .finally(()=>rl.resume());
 });
 rl.on('close', async()=>{await closeContext(); process.exit(0);});
@@ -188,15 +194,32 @@ class _BrowserWorker:
             try:
                 self.process.stdin.write((json.dumps(config) + "\n").encode())
                 await self.process.stdin.drain()
-                line = await asyncio.wait_for(self.process.stdout.readline(), timeout=timeout)
-                if not line:
+                header = await asyncio.wait_for(self.process.stdout.readline(), timeout=timeout)
+                if not header:
                     detail = bytes(self.stderr_tail).decode(errors="replace")[-500:]
                     await self._stop_locked()
                     raise RuntimeError(
                         f"Playwright worker exited unexpectedly: {detail}"
                     )
-                result = json.loads(line)
-            except (asyncio.TimeoutError, BrokenPipeError, json.JSONDecodeError) as exc:
+                try:
+                    response_size = int(header)
+                except ValueError as exc:
+                    raise ValueError("invalid Playwright worker response frame") from exc
+                if response_size < 0 or response_size > _MAX_WORKER_RESPONSE_BYTES:
+                    raise ValueError(
+                        f"Playwright worker response exceeds {_MAX_WORKER_RESPONSE_BYTES} bytes"
+                    )
+                payload = await asyncio.wait_for(
+                    self.process.stdout.readexactly(response_size), timeout=timeout
+                )
+                result = json.loads(payload)
+            except (
+                asyncio.TimeoutError,
+                asyncio.IncompleteReadError,
+                BrokenPipeError,
+                ValueError,
+                json.JSONDecodeError,
+            ) as exc:
                 await self._stop_locked()
                 if isinstance(exc, asyncio.TimeoutError):
                     raise RuntimeError("Browser run exceeded its bounded execution time") from exc
@@ -238,6 +261,26 @@ class BrowserRunHandler(AsyncHandler):
     @property
     def command_name(self) -> str:
         return "browser_run"
+
+    async def send_response(self, payload, reply_channel=None, project_id=None):
+        """Chunk large browser results while preserving the normal response envelope."""
+        if payload.get("event") == "browser_run_response":
+            serialized = json.dumps(payload, separators=(",", ":"))
+            if should_chunk_content(serialized):
+                base_response = {
+                    "event": "browser_run_response",
+                    "success": bool(payload.get("success")),
+                    "browser_chunked": True,
+                }
+                for key in ("request_id", "trace"):
+                    if key in payload:
+                        base_response[key] = payload[key]
+                for chunk in create_chunked_response(
+                    base_response, "chunk_content", serialized
+                ):
+                    await super().send_response(chunk, reply_channel, project_id)
+                return
+        await super().send_response(payload, reply_channel, project_id)
 
     async def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
         session_id = str(message.get("session_id") or "default")

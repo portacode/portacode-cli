@@ -1,5 +1,8 @@
 import unittest
-from unittest.mock import AsyncMock, patch
+import asyncio
+import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 from . import browser_handlers
 from .browser_handlers import BrowserRunHandler
@@ -60,3 +63,54 @@ class BrowserRunHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNot(first, other_user)
         self.assertIsNot(first, other_session)
         browser_handlers._WORKERS.clear()
+
+    async def test_worker_reads_large_length_prefixed_response(self):
+        payload = {"ok": True, "screenshots": [{"data": "a" * 200_000}]}
+        encoded = json.dumps(payload).encode()
+        stdout = asyncio.StreamReader()
+        stdout.feed_data(str(len(encoded)).encode() + b"\n" + encoded)
+        stdout.feed_eof()
+
+        class Stdin:
+            def write(self, _value):
+                return None
+
+            async def drain(self):
+                return None
+
+        worker = browser_handlers._BrowserWorker(
+            user="tester", session_id="large", argv=["node"], env={}
+        )
+        worker.process = SimpleNamespace(
+            stdin=Stdin(), stdout=stdout, returncode=None
+        )
+        worker._start = AsyncMock()
+        worker._schedule_idle_close = Mock()
+
+        self.assertEqual(await worker.run({}, timeout=1), payload)
+
+    async def test_large_browser_response_uses_existing_chunk_format(self):
+        channel = AsyncMock()
+        handler = BrowserRunHandler(channel, {})
+        payload = {
+            "event": "browser_run_response",
+            "request_id": "request-1",
+            "success": True,
+            "screenshots": [{"data": "a" * 300_000}],
+        }
+
+        await handler.send_response(payload)
+
+        sent = [call.args[0] for call in channel.send.await_args_list]
+        self.assertGreater(len(sent), 1)
+        self.assertTrue(all(item["browser_chunked"] for item in sent))
+        self.assertEqual(
+            {item["transfer_id"] for item in sent}, {sent[0]["transfer_id"]}
+        )
+        self.assertEqual(
+            "".join(item["chunk_content"] for item in sent),
+            json.dumps(payload, separators=(",", ":")),
+        )
+
+    def test_null_nth_is_treated_as_omitted(self):
+        self.assertIn("s.nth == null ? l : l.nth(s.nth)", browser_handlers._RUNNER)
