@@ -343,6 +343,12 @@ def ensure_codex_home() -> Path:
     sessions_dir = codex_home / "sessions"
     sessions_dir.mkdir(parents=True, exist_ok=True)
 
+    # The Portacode service may run as root even though Codex is launched as
+    # the requested runtime user. Repair the two directories we create here
+    # unconditionally so a root service cannot leave Codex unable to save
+    # threads. Keep this non-recursive to avoid touching live session files.
+    _repair_codex_home_ownership(codex_home, sessions_dir)
+
     root_codex = Path("/root/.codex")
     root_sessions = root_codex / "sessions"
     seeded_paths: list[Path] = []
@@ -403,6 +409,20 @@ def ensure_codex_home() -> Path:
     except Exception:
         pass
     return codex_home
+
+
+def _repair_codex_home_ownership(codex_home: Path, sessions_dir: Path) -> None:
+    try:
+        from portacode.connection.handlers.runtime_user import (
+            chown_path_if_possible,
+            get_default_runtime_user,
+        )
+
+        owner = get_default_runtime_user()
+        chown_path_if_possible(codex_home, owner)
+        chown_path_if_possible(sessions_dir, owner)
+    except Exception:
+        pass
 
 
 def apply_codex_env_to_mapping(

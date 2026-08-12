@@ -9,6 +9,7 @@ from portacode.codex_prepare import (
     CodexPreparationError,
     _run,
     _install_node_if_needed,
+    ensure_codex_home,
     install_codex_dependencies,
     resolve_codex_home,
     write_codex_config,
@@ -133,3 +134,19 @@ def test_write_codex_config_forces_local_proxy(tmp_path, monkeypatch):
     assert "openai_base_url" in text
     assert '[projects."/home/bishoy/souldesign_container"]' in text
     assert 'trust_level = "trusted"' in text
+
+
+def test_ensure_codex_home_repairs_runtime_user_directory_ownership(tmp_path, monkeypatch):
+    home = tmp_path / ".codex"
+    ownership_calls = []
+    monkeypatch.setattr("portacode.codex_prepare.resolve_codex_home", lambda: home)
+    monkeypatch.setattr("portacode.codex_prepare._persist_codex_home_env", lambda path: None)
+    monkeypatch.setattr("portacode.codex_prepare.write_codex_config", lambda path: path / "config.toml")
+    monkeypatch.setitem(
+        ensure_codex_home.__globals__,
+        "_repair_codex_home_ownership",
+        lambda codex_home, sessions_dir: ownership_calls.append((codex_home, sessions_dir)),
+    )
+
+    assert ensure_codex_home() == home
+    assert ownership_calls == [(home, home / "sessions")]
