@@ -95,6 +95,84 @@ class ProxmoxInfraHandlerTests(TestCase):
         self.assertIs(state["base_summary"], refreshed)
         self.assertIn("reservation", state["pending"])
         self.assertEqual(state["revision"], 4)
+        self.assertEqual(result["cleaned_vmids"], [])
+
+    @patch("portacode.connection.handlers.cloudflare_forwarding.set_container_forwarding_rules")
+    @patch("portacode.connection.handlers.proxmox_infra._load_config", return_value={"node": "pve"})
+    def test_reconciliation_cleans_metadata_for_container_deleted_in_proxmox(
+        self, _config, clear_forwarding
+    ):
+        record = {"vmid": 144, "device_id": "42", "disk_gib": 4}
+        state = {
+            "initialized": True,
+            "base_summary": {},
+            "initial_totals": {},
+            "records": {"144": record.copy()},
+            "pending": {},
+            "revision": 2,
+        }
+        refreshed = {
+            "inventory_updated_at": "now",
+            "missing_containers": [{"vmid": "144", "device_id": "42"}],
+            "total_ram_mib": 0,
+            "total_disk_gib": 0,
+            "total_cpu_share": 0,
+        }
+        with TemporaryDirectory() as root, patch(
+            "portacode.connection.handlers.proxmox_infra.CONTAINERS_DIR", Path(root)
+        ), patch(
+            "portacode.connection.handlers.proxmox_infra._MANAGED_CONTAINERS_STATE", state
+        ), patch(
+            "portacode.connection.handlers.proxmox_infra._build_full_container_summary",
+            return_value=refreshed,
+        ):
+            record_path = Path(root) / "ct-144.json"
+            record_path.write_text("{}")
+            result = reconcile_managed_containers_inventory()
+
+            self.assertFalse(record_path.exists())
+
+        clear_forwarding.assert_called_once_with("42", [])
+        self.assertNotIn("144", state["records"])
+        self.assertEqual(state["base_summary"]["missing_containers"], [])
+        self.assertEqual(result["cleaned_vmids"], [144])
+        self.assertEqual(result["cleanup_errors"], [])
+
+    @patch(
+        "portacode.connection.handlers.cloudflare_forwarding.set_container_forwarding_rules",
+        side_effect=RuntimeError("cloudflare update failed"),
+    )
+    @patch("portacode.connection.handlers.proxmox_infra._load_config", return_value={"node": "pve"})
+    def test_reconciliation_retains_metadata_when_forwarding_cleanup_fails(
+        self, _config, _clear_forwarding
+    ):
+        record = {"vmid": 144, "device_id": "42"}
+        state = {
+            "initialized": True, "base_summary": {}, "initial_totals": {},
+            "records": {"144": record.copy()}, "pending": {}, "revision": 2,
+        }
+        refreshed = {
+            "inventory_updated_at": "now",
+            "missing_containers": [{"vmid": "144", "device_id": "42"}],
+            "total_ram_mib": 0, "total_disk_gib": 0, "total_cpu_share": 0,
+        }
+        with TemporaryDirectory() as root, patch(
+            "portacode.connection.handlers.proxmox_infra.CONTAINERS_DIR", Path(root)
+        ), patch(
+            "portacode.connection.handlers.proxmox_infra._MANAGED_CONTAINERS_STATE", state
+        ), patch(
+            "portacode.connection.handlers.proxmox_infra._build_full_container_summary",
+            return_value=refreshed,
+        ):
+            record_path = Path(root) / "ct-144.json"
+            record_path.write_text("{}")
+            result = reconcile_managed_containers_inventory()
+
+            self.assertTrue(record_path.exists())
+
+        self.assertIn("144", state["records"])
+        self.assertEqual(result["cleaned_vmids"], [])
+        self.assertEqual(result["cleanup_errors"][0]["vmid"], "144")
 
     @patch("portacode.connection.handlers.proxmox_infra._load_config", return_value={"node": "pve"})
     def test_reconciliation_discards_scan_when_managed_state_changes(self, _config):

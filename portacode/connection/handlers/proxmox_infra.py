@@ -1371,20 +1371,77 @@ def reconcile_managed_containers_inventory() -> Dict[str, Any]:
     if not config:
         return {"refreshed": False, "reason": "not_configured"}
     refreshed_summary = _build_full_container_summary(records, config)
+    missing_records = [
+        record
+        for record in records
+        if str(record.get("vmid"))
+        in {
+            str(entry.get("vmid"))
+            for entry in refreshed_summary.get("missing_containers", [])
+            if entry.get("vmid") is not None
+        }
+    ]
+
     refreshed_totals = {
         "ram_mib": int(refreshed_summary.get("total_ram_mib") or 0),
         "disk_gib": int(refreshed_summary.get("total_disk_gib") or 0),
         "cpu_share": float(refreshed_summary.get("total_cpu_share") or 0.0),
     }
 
+    cleaned_vmids: List[int] = []
+    cleanup_errors: List[Dict[str, str]] = []
     with _MANAGED_CONTAINERS_STATE_LOCK:
         if int(_MANAGED_CONTAINERS_STATE.get("revision") or 0) != revision:
             return {"refreshed": False, "reason": "state_changed"}
+        # Serialize cleanup with create/delete state mutations. This prevents a
+        # stale inventory scan from clearing metadata after a CTID is reused.
+        for record in missing_records:
+            try:
+                vmid = int(record["vmid"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            device_id = str(record.get("device_id") or "").strip()
+            try:
+                if device_id:
+                    from .cloudflare_forwarding import set_container_forwarding_rules
+
+                    try:
+                        set_container_forwarding_rules(device_id, [])
+                    except RuntimeError as exc:
+                        message = str(exc).lower()
+                        if (
+                            "cloudflare tunnel is not configured yet" not in message
+                            and "domain or tunnel name missing" not in message
+                        ):
+                            raise
+                cleaned_vmids.append(vmid)
+            except Exception as exc:  # retry on the next reconciliation pass
+                logger.warning(
+                    "Unable to clean Proxmox-side metadata for missing container %s: %s",
+                    vmid,
+                    exc,
+                )
+                cleanup_errors.append({"vmid": str(vmid), "error": str(exc)})
+        for vmid in cleaned_vmids:
+            path = CONTAINERS_DIR / f"ct-{vmid}.json"
+            path.unlink(missing_ok=True)
+            _MANAGED_CONTAINERS_STATE["records"].pop(str(vmid), None)
+        if cleaned_vmids:
+            cleaned_keys = {str(vmid) for vmid in cleaned_vmids}
+            refreshed_summary["missing_containers"] = [
+                entry
+                for entry in refreshed_summary.get("missing_containers", [])
+                if str(entry.get("vmid")) not in cleaned_keys
+            ]
         _MANAGED_CONTAINERS_STATE["base_summary"] = refreshed_summary
         _MANAGED_CONTAINERS_STATE["initial_totals"] = refreshed_totals
+        if cleaned_vmids:
+            _MANAGED_CONTAINERS_STATE["revision"] = revision + 1
     return {
         "refreshed": True,
         "inventory_updated_at": refreshed_summary.get("inventory_updated_at"),
+        "cleaned_vmids": cleaned_vmids,
+        "cleanup_errors": cleanup_errors,
     }
 
 
