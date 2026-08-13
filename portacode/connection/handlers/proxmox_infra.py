@@ -54,10 +54,9 @@ CACHE_PARENT_MARKER = "cache_parent="
 _PROVISIONING_MAINTENANCE_LAST_RUN = 0.0
 PROVISIONING_MAINTENANCE_INTERVAL_S = 300
 PROXMOX_INVENTORY_RECONCILE_INTERVAL_S = 300
-# Keep reusable roots small while leaving enough room for the OS, Portacode,
-# Codex, and (on apt systems) Playwright Chromium to be installed. A request
-# below this size still builds at its requested size; if the software cannot
-# fit, provisioning fails rather than silently giving the user a larger disk.
+# Every distro/storage lineage has one reusable base template of this exact
+# size. Guests may request more space and expand their linked clone, but neither
+# requests nor cache templates may be smaller than the canonical base.
 PROVISIONING_TEMPLATE_BASE_DISK_GIB = 4
 
 
@@ -1516,6 +1515,7 @@ def _build_full_container_summary(records: List[Dict[str, Any]], config: Dict[st
                 allocated_disk += disk_gib
                 registry_record = template_registry.get(vmid_str) or {}
                 source_hash = _extract_marker_value(description, CACHE_SOURCE_MARKER)
+                resolved_source = registry_record.get("source_template") or source_by_hash.get(source_hash)
                 templates.append({
                     "type": kind,
                     "vmid": vmid_str,
@@ -1525,7 +1525,13 @@ def _build_full_container_summary(records: List[Dict[str, Any]], config: Dict[st
                     "disk_gib": disk_gib,
                     "ram_mib": _pick_container_ram_mib(kind, cfg, entry),
                     "cpu_share": _pick_container_cpu_share(kind, cfg, entry),
-                    "source_template": registry_record.get("source_template") or source_by_hash.get(source_hash),
+                    "source_template": resolved_source,
+                    "source_hash": registry_record.get("source_hash") or source_hash,
+                    "display_name": (
+                        f"{_cache_source_display_name(resolved_source or '')} "
+                        f"— base {registry_record.get('cache_id') or _extract_marker_value(description, CACHE_ID_MARKER) or 'unknown'} "
+                        f"({int(disk_gib)} GiB)"
+                    ),
                     "cache_id": registry_record.get("cache_id") or _extract_marker_value(description, CACHE_ID_MARKER),
                     "cache_status": registry_record.get("status"),
                     "is_cache_template": PORTACODE_CACHE_MARKER in description,
@@ -1870,6 +1876,31 @@ def _cache_source_hash(source_template: str) -> str:
     return hashlib.sha256(source_template.encode("utf-8")).hexdigest()[:16]
 
 
+def _cache_source_display_name(source_template: str) -> str:
+    """Return a concise distro/version label for operators and inventory UI."""
+    filename = str(source_template or "").rsplit("/", 1)[-1]
+    filename = re.sub(r"\.(?:tar\.(?:gz|xz|zst)|tar|tgz|txz)$", "", filename, flags=re.I)
+    filename = re.sub(r"_\d{8}_[a-z0-9]+$", "", filename, flags=re.I)
+    filename = re.sub(r"_\d+(?:\.\d+)*(?:-\d+)?_[a-z0-9.]+$", "", filename, flags=re.I)
+    filename = re.sub(r"-(?:default|standard|turnkey-[a-z0-9-]+)$", "", filename, flags=re.I)
+    words = [part for part in re.split(r"[-_]+", filename) if part]
+    return " ".join(
+        word.capitalize() if not re.match(r"^\d", word) else word
+        for word in words
+    ) or "Unknown distro"
+
+
+def _cache_template_hostname(source_template: str) -> str:
+    """Human-readable, deterministic Proxmox hostname for the canonical base."""
+    label = _cache_source_display_name(source_template).lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", label).strip("-") or "distro"
+    cache_version = re.sub(r"[^a-z0-9]+", "-", PROVISIONING_CACHE_ID.lower()).strip("-")
+    suffix = f"-v{cache_version}-{PROVISIONING_TEMPLATE_BASE_DISK_GIB}g"
+    prefix = "cache-"
+    max_slug_length = 63 - len(prefix) - len(suffix)
+    return f"{prefix}{slug[:max_slug_length].rstrip('-')}{suffix}"
+
+
 def _cache_lineage_key(source_template: str, storage: str) -> str:
     return f"{_cache_source_hash(source_template)}:{storage}"
 
@@ -1959,8 +1990,8 @@ def _find_native_template(
         and record.get("node") == node
         and record.get("cache_id") == PROVISIONING_CACHE_ID
         and record.get("status") == "ready"
-        and int(record.get("disk_gib") or 0) > 0
-        and int(record.get("disk_gib") or 0) <= int(requested_disk_gib)
+        and int(record.get("disk_gib") or 0) == PROVISIONING_TEMPLATE_BASE_DISK_GIB
+        and int(requested_disk_gib) >= PROVISIONING_TEMPLATE_BASE_DISK_GIB
     ]
     candidates.sort(key=lambda entry: str(entry.get("created_at") or ""), reverse=True)
     for record in candidates:
@@ -2949,6 +2980,10 @@ def _build_container_payload(message: Dict[str, Any], config: Dict[str, Any]) ->
     bridge = config.get("network", {}).get("bridge", DEFAULT_BRIDGE)
     hostname = (message.get("hostname") or "").strip()
     disk_gib = int(max(round(_validate_positive_number(message.get("disk_gib") or message.get("disk"), 3)), 1))
+    if disk_gib < PROVISIONING_TEMPLATE_BASE_DISK_GIB:
+        raise ValueError(
+            f"disk_gib must be at least {PROVISIONING_TEMPLATE_BASE_DISK_GIB} GiB"
+        )
     ram_mib = int(max(round(_validate_positive_number(message.get("ram_mib") or message.get("ram"), 2048)), 1))
     cpus = _validate_positive_number(message.get("cpus"), 0.2)
     storage = message.get("storage") or config.get("default_storage") or ""
@@ -4366,13 +4401,8 @@ class CreateProxmoxContainerHandler(SyncHandler):
                             )
                         else:
                             builder_payload = dict(payload)
-                            builder_payload["disk_gib"] = min(
-                                int(payload["disk_gib"]),
-                                PROVISIONING_TEMPLATE_BASE_DISK_GIB,
-                            )
-                            builder_payload["hostname"] = (
-                                f"pcache-{_cache_source_hash(source_template)[:8]}-{PROVISIONING_CACHE_ID}"
-                            )[:63]
+                            builder_payload["disk_gib"] = PROVISIONING_TEMPLATE_BASE_DISK_GIB
+                            builder_payload["hostname"] = _cache_template_hostname(source_template)
                             builder_payload["description"] = _cache_template_description(
                                 source_template,
                                 payload["storage"],
@@ -4517,10 +4547,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
                         vmid,
                         source_template=source_template,
                         storage=payload_local["storage"],
-                        disk_gib=min(
-                            int(payload_local["disk_gib"]),
-                            PROVISIONING_TEMPLATE_BASE_DISK_GIB,
-                        ),
+                        disk_gib=PROVISIONING_TEMPLATE_BASE_DISK_GIB,
                     )
                     _raise_if_device_deletion_requested(device_id)
                     builder_vmid = vmid

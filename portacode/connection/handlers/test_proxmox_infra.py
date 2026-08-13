@@ -9,6 +9,8 @@ from portacode.connection.handlers.proxmox_infra import (
     _compose_managed_containers_summary,
     _build_bootstrap_steps,
     _cacheable_bootstrap_steps,
+    _cache_source_display_name,
+    _cache_template_hostname,
     _claim_ctid_for_reservation,
     _dynamic_bootstrap_steps,
     _enforce_service_venv_execstart,
@@ -33,6 +35,15 @@ from portacode.connection.handlers.proxmox_infra import (
 
 
 class ProxmoxInfraHandlerTests(TestCase):
+    def test_cache_template_names_are_human_readable_and_fixed_size(self):
+        source = "local:vztmpl/alpine-3.17-default_20221129_amd64.tar.xz"
+
+        self.assertEqual(_cache_source_display_name(source), "Alpine 3.17")
+        self.assertEqual(
+            _cache_template_hostname(source),
+            "cache-alpine-3-17-v2026-08-09-6-4g",
+        )
+
     def test_reconciled_external_deletion_is_not_reinserted_from_local_record(self):
         summary = _compose_managed_containers_summary(
             [{"vmid": 144, "device_id": "42", "ram_mib": 2048, "disk_gib": 14, "cpus": 1}],
@@ -487,6 +498,27 @@ class ProxmoxInfraHandlerTests(TestCase):
         )
 
         self.assertEqual(selected["vmid"], 901)
+
+    @patch("portacode.connection.handlers.proxmox_infra._proxmox_template_exists")
+    @patch("portacode.connection.handlers.proxmox_infra._load_provisioning_templates")
+    def test_noncanonical_cache_disk_is_not_selected(self, mock_load, mock_exists):
+        from portacode.connection.handlers.proxmox_infra import (
+            PROVISIONING_CACHE_ID,
+            _cache_lineage_key,
+        )
+
+        source = "local:vztmpl/alpine-3.17-default_20221129_amd64.tar.xz"
+        mock_load.return_value = [{
+            "vmid": 900,
+            "node": "pve",
+            "lineage": _cache_lineage_key(source, "local-lvm"),
+            "disk_gib": 3,
+            "cache_id": PROVISIONING_CACHE_ID,
+            "status": "ready",
+        }]
+
+        self.assertIsNone(_find_native_template(MagicMock(), "pve", source, "local-lvm", 8))
+        mock_exists.assert_not_called()
 
     @patch(
         "portacode.connection.handlers.proxmox_infra._wait_for_task",
