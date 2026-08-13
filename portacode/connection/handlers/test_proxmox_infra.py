@@ -78,6 +78,43 @@ class ProxmoxInfraHandlerTests(TestCase):
         self.assertEqual(summary["containers"], [])
         self.assertEqual(summary["missing_containers"][0]["vmid"], "144")
 
+    def test_composed_snapshot_keeps_live_proxmox_fields_and_durable_identity(self):
+        summary = _compose_managed_containers_summary(
+            [{
+                "vmid": 134, "device_id": "888", "provisioning_id": "provisioning",
+                "template": "ubuntu.tar.zst", "created_at": "created",
+                "hostname": "stale-name", "status": "running", "ram_mib": 4096,
+                "disk_gib": 10, "cpus": 4,
+            }],
+            [],
+            {
+                "containers": [{
+                    "vmid": "134", "device_id": "888", "hostname": "openclaw",
+                    "status": "stopped", "ram_mib": 16, "disk_gib": 12,
+                    "disk_used_gib": 5, "cpu_share": 1, "storage": "local-lvm",
+                    "reserve_on_boot": False, "matches_default_storage": True,
+                    "managed": True,
+                }],
+                "missing_containers": [],
+                "allocated_ram_mib": 16, "allocated_disk_gib": 12,
+                "allocated_cpu_share": 1, "available_ram_mib": 1000,
+                "available_disk_gib": 100,
+            },
+            {"ram_mib": 16, "disk_gib": 12, "cpu_share": 1},
+        )
+
+        container = summary["containers"][0]
+        self.assertEqual(container["ram_mib"], 16)
+        self.assertEqual(container["disk_gib"], 12)
+        self.assertEqual(container["disk_used_gib"], 5)
+        self.assertEqual(container["cpu_share"], 1)
+        self.assertEqual(container["status"], "stopped")
+        self.assertEqual(container["hostname"], "openclaw")
+        self.assertEqual(container["device_id"], "888")
+        self.assertEqual(container["provisioning_id"], "provisioning")
+        self.assertEqual(container["template"], "ubuntu.tar.zst")
+        self.assertEqual(container["created_at"], "created")
+
     @patch("portacode.connection.handlers.proxmox_infra._build_full_container_summary")
     @patch("portacode.connection.handlers.proxmox_infra._load_config", return_value={"node": "pve"})
     def test_reconciliation_atomically_replaces_inventory_baseline(self, _config, build_summary):

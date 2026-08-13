@@ -1499,6 +1499,7 @@ def _build_managed_containers_summary(records: List[Dict[str, Any]]) -> Dict[str
             {
                 "vmid": str(_as_int(record.get("vmid"))) if record.get("vmid") is not None else None,
                 "device_id": record.get("device_id"),
+                "provisioning_id": record.get("provisioning_id"),
                 "hostname": record.get("hostname"),
                 "template": record.get("template"),
                 "storage": record.get("storage"),
@@ -1807,11 +1808,11 @@ def _compose_managed_containers_summary(
             # field.  The durable record exists to retain Portacode identity and
             # history, not to overwrite a reconciliation scan with provisioning-
             # time RAM, disk, CPU, status, hostname, or placement values.
-            merged = base_entry.copy()
-            merged.update(entry)
+            merged = entry.copy()
+            merged.update(base_entry)
             for identity_key in ("device_id", "provisioning_id", "template", "created_at"):
-                if base_entry.get(identity_key) not in (None, ""):
-                    merged[identity_key] = base_entry[identity_key]
+                if entry.get(identity_key) not in (None, ""):
+                    merged[identity_key] = entry[identity_key]
         else:
             merged = entry.copy()
             merged.setdefault("managed", True)
