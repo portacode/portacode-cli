@@ -123,13 +123,16 @@ def _normalize_rules(
         validated_hostname = _validate_hostname(hostname or "", domain)
         if parsed is None:
             parsed = _parse_destination(destination or "")
-        normalized.append(
-            {
+        normalized_rule = {
                 "hostname": validated_hostname,
                 "destination": destination or "",
                 "parsed": parsed,
             }
-        )
+        if from_storage:
+            resolved_ip = str(entry.get("resolved_ip") or "").strip()
+            if resolved_ip:
+                normalized_rule["resolved_ip"] = resolved_ip
+        normalized.append(normalized_rule)
     return normalized
 
 
@@ -221,7 +224,17 @@ def _resolve_service_endpoint(
         ip = cache[device_id]
     else:
         vmid = _resolve_device_vmid(device_id, proxmox, node)
-        ip = _find_container_ip(proxmox, node, vmid, leases)
+        try:
+            ip = _find_container_ip(proxmox, node, vmid, leases)
+        except RuntimeError:
+            ip = str(parsed.get("resolved_ip") or "").strip()
+            if not ip:
+                raise
+            logger.info(
+                "Using last resolved IP for offline exposed device device_id=%s ip=%s",
+                device_id,
+                ip,
+            )
         cache[device_id] = ip
     port = parsed["port"]
     scheme = parsed["scheme"]
@@ -235,8 +248,12 @@ def _build_ingress_entries(
     leases = _load_leases() if proxmox else []
     device_ip_cache: Dict[str, str] = {}
     for rule in rules:
-        parsed = rule["parsed"]
+        parsed = dict(rule["parsed"])
+        if rule.get("resolved_ip"):
+            parsed["resolved_ip"] = rule["resolved_ip"]
         service = _resolve_service_endpoint(parsed, proxmox, node, leases, device_ip_cache)
+        if parsed["type"] == "device":
+            rule["resolved_ip"] = urlparse(service).hostname
         entry: Dict[str, Any] = {"hostname": rule["hostname"], "service": service}
         path = parsed.get("path", "")
         if path:
@@ -252,6 +269,35 @@ def _build_ingress_entries(
                 entry["originRequest"] = {"noTLSVerify": True}
         entries.append(entry)
     return entries
+
+
+def _load_active_config_resolved_ips(tunnel_state: Dict[str, Any]) -> Dict[str, str]:
+    """Recover last working hostname endpoints when upgrading old forwarding state."""
+    cfg = tunnel_state.get("config_path")
+    config_path = Path(str(cfg)) if cfg else Path(default_config_path())
+    try:
+        lines = config_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    resolved: Dict[str, str] = {}
+    hostname = ""
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        if stripped.startswith("- hostname:"):
+            hostname = stripped.split(":", 1)[1].strip()
+            continue
+        if hostname and stripped.startswith("service:"):
+            service = stripped.split(":", 1)[1].strip()
+            parsed = urlparse(service)
+            if parsed.hostname:
+                try:
+                    ipaddress.ip_address(parsed.hostname)
+                except ValueError:
+                    pass
+                else:
+                    resolved[hostname] = parsed.hostname
+            hostname = ""
+    return resolved
 
 
 def _format_config_value(value: Any) -> str:
@@ -357,10 +403,28 @@ def _load_tunnel_state() -> Dict[str, Any]:
 
 
 def _sanitize_rules(rules: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-    return [
-        {"hostname": rule["hostname"], "destination": rule["destination"]}
-        for rule in rules
-    ]
+    sanitized = []
+    for rule in rules:
+        item = {"hostname": rule["hostname"], "destination": rule["destination"]}
+        if rule.get("resolved_ip"):
+            item["resolved_ip"] = rule["resolved_ip"]
+        sanitized.append(item)
+    return sanitized
+
+
+def _node_device_id(tunnel_state: Dict[str, Any]) -> str:
+    explicit = str(tunnel_state.get("node_device_id") or "").strip()
+    if explicit.isdigit():
+        return explicit
+    match = re.fullmatch(r"portacode-proxmox-(\d+)", str(tunnel_state.get("tunnel_name") or ""))
+    if not match:
+        raise RuntimeError("Unable to determine node device ID for wildcard forwarding")
+    return match.group(1)
+
+
+def _wildcard_hostname(tunnel_state: Dict[str, Any]) -> str:
+    domain = str(tunnel_state.get("domain") or "").strip().lower().rstrip(".")
+    return f"*.{_node_device_id(tunnel_state)}.{domain}"
 
 
 def _apply_and_persist_forwarding_rules(
@@ -372,6 +436,11 @@ def _apply_and_persist_forwarding_rules(
     tunnel_name = tunnel_state.get("tunnel_name")
     if not domain or not tunnel_name:
         raise RuntimeError("Cloudflare domain or tunnel name missing from state.")
+
+    active_resolved_ips = _load_active_config_resolved_ips(tunnel_state)
+    for rule in rules:
+        if not rule.get("resolved_ip") and rule.get("hostname") in active_resolved_ips:
+            rule["resolved_ip"] = active_resolved_ips[rule["hostname"]]
 
     operation_id = f"apply-{time.monotonic_ns()}"
     total_started = time.monotonic()
@@ -389,7 +458,10 @@ def _apply_and_persist_forwarding_rules(
     started = time.monotonic()
     _write_cloudflared_config(tunnel_state, entries)
     _timed_stage(operation_id, "write_cloudflared_config", started, entry_count=len(entries))
-    hostnames = [entry["hostname"] for entry in entries if entry.get("hostname")]
+    forwarding_state = load_forwarding_state()
+    desired_wildcard = _wildcard_hostname(tunnel_state)
+    provisioned_wildcard = str(forwarding_state.get("wildcard_dns_hostname") or "")
+    hostnames = [] if provisioned_wildcard == desired_wildcard else [desired_wildcard]
     if hostnames:
         started = time.monotonic()
         _route_dns(hostnames, tunnel_name)
@@ -398,7 +470,9 @@ def _apply_and_persist_forwarding_rules(
     _reload_cloudflared_service()
     _timed_stage(operation_id, "reload_cloudflared_call", started)
     started = time.monotonic()
-    state = persist_forwarding_state(rules)
+    state = persist_forwarding_state(
+        rules, metadata={"wildcard_dns_hostname": desired_wildcard}
+    )
     _timed_stage(operation_id, "persist_forwarding_state", started, rule_count=len(rules))
     _timed_stage(operation_id, "apply_total", total_started, rule_count=len(rules))
     return {
@@ -416,6 +490,20 @@ def _normalize_subdomain_label(subdomain: Any, device_id: str, index: int) -> st
     if not CONTAINER_SUBDOMAIN_RE.match(candidate):
         raise ValueError("subdomain must follow '<device_id>' or '<index>_<device_id>' format")
     return candidate
+
+
+def _new_container_hostname(
+    device_id: str,
+    port: int,
+    protocol: str,
+    index: int,
+    tunnel_state: Dict[str, Any],
+) -> str:
+    node_id = _node_device_id(tunnel_state)
+    domain = str(tunnel_state.get("domain") or "").strip().lower().rstrip(".")
+    protocol_suffix = "-https" if protocol == "https" else ""
+    label = device_id if index == 0 else f"{device_id}-{port}{protocol_suffix}"
+    return f"{label}.{node_id}.{domain}"
 
 
 def _normalize_container_rule_specs(
@@ -743,18 +831,40 @@ def set_container_forwarding_rules(
             for rule in existing_rules
             if not _rule_targets_container(rule, normalized_device_id, domain)
         ]
+        existing_target_rules = [
+            rule
+            for rule in existing_rules
+            if _rule_targets_container(rule, normalized_device_id, domain)
+        ]
+        reusable_hostnames: Dict[tuple[int, str], str] = {}
+        recorded_target_ip = ""
+        for rule in existing_target_rules:
+            parsed = rule.get("parsed") or {}
+            if parsed.get("type") != "device":
+                continue
+            reusable_hostnames[(int(parsed["port"]), str(parsed["scheme"]))] = rule["hostname"]
+            recorded_target_ip = str(rule.get("resolved_ip") or recorded_target_ip)
         new_rules: List[Dict[str, Any]] = []
         exposed_ports: List[Dict[str, Any]] = []
         for spec in normalized_specs:
-            hostname = f"{spec['subdomain']}.{domain}"
+            hostname = reusable_hostnames.get((spec["port"], spec["protocol"]))
+            if not hostname:
+                hostname = _new_container_hostname(
+                    normalized_device_id,
+                    spec["port"],
+                    spec["protocol"],
+                    len(new_rules),
+                    tunnel_state,
+                )
             destination = f"{spec['protocol']}://[{normalized_device_id}]:{spec['port']}"
-            new_rules.append(
-                {
+            new_rule = {
                     "hostname": hostname,
                     "destination": destination,
                     "parsed": _parse_destination(destination),
                 }
-            )
+            if recorded_target_ip:
+                new_rule["resolved_ip"] = recorded_target_ip
+            new_rules.append(new_rule)
             exposed_ports.append(
                 {
                     "port": spec["port"],
@@ -814,6 +924,60 @@ def set_container_forwarding_rules(
         "updated_at": persisted["updated_at"],
         "exposed_ports": exposed_ports,
     }
+
+
+def reconcile_container_forwarding_ip(
+    container_device_id: Any,
+    *,
+    proxmox: Any | None = None,
+    node: str | None = None,
+    lease_attempts: int = 1,
+    lease_retry_seconds: float = 1.0,
+) -> bool:
+    """Refresh ingress after a started exposed container receives a different IP."""
+    device_id = str(container_device_id or "").strip()
+    if not device_id:
+        return False
+    tunnel_state = _load_tunnel_state()
+    domain = str(tunnel_state.get("domain") or "").strip().lower().rstrip(".")
+    with _FORWARDING_UPDATE_LOCK:
+        stored = load_forwarding_state().get("rules", [])
+        rules = _normalize_rules(stored, domain, from_storage=True)
+        target_rules = [rule for rule in rules if _rule_targets_container(rule, device_id, domain)]
+        if not target_rules:
+            return False
+        if proxmox is None or node is None:
+            infra_config = _ensure_infra_configured()
+            proxmox = _connect_proxmox(infra_config)
+            node = _get_node_from_config(infra_config)
+        vmid = _resolve_device_vmid(device_id, proxmox, node)
+        live_ip = ""
+        last_error: Exception | None = None
+        for attempt in range(max(1, lease_attempts)):
+            try:
+                live_ip = _find_container_ip(proxmox, node, vmid, _load_leases())
+                break
+            except RuntimeError as exc:
+                last_error = exc
+                if attempt + 1 < max(1, lease_attempts):
+                    time.sleep(max(0.0, lease_retry_seconds))
+        if not live_ip:
+            raise RuntimeError(
+                f"Unable to resolve live IP after container start: {last_error}"
+            )
+        recorded_ips = {str(rule.get("resolved_ip") or "") for rule in target_rules}
+        if recorded_ips == {live_ip}:
+            return False
+        logger.info(
+            "Exposed container IP changed device_id=%s recorded_ips=%s live_ip=%s; rebuilding ingress",
+            device_id,
+            sorted(recorded_ips),
+            live_ip,
+        )
+        for rule in target_rules:
+            rule["resolved_ip"] = live_ip
+        _apply_and_persist_forwarding_rules(rules, tunnel_state=tunnel_state)
+        return True
 
 
 class CloudflareForwardingHandler(SyncHandler):

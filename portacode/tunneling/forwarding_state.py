@@ -27,9 +27,13 @@ def load_forwarding_state() -> Dict[str, Any]:
         return {"rules": []}
 
 
-def persist_forwarding_state(rules: List[Dict[str, Any]]) -> Dict[str, Any]:
+def persist_forwarding_state(
+    rules: List[Dict[str, Any]], *, metadata: Dict[str, Any] | None = None
+) -> Dict[str, Any]:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     payload = {"rules": rules, "updated_at": _current_time_iso()}
+    if metadata:
+        payload.update(metadata)
     tmp_path = STATE_PATH.with_suffix(".tmp")
     tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     os.replace(tmp_path, STATE_PATH)

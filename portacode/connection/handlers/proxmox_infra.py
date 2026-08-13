@@ -4974,6 +4974,25 @@ class StartProxmoxContainerHandler(SyncHandler):
         status, elapsed = _start_container(proxmox, node, vmid)
         _update_container_record(vmid, {"status": "running"})
 
+        forwarding_ip_updated = False
+        try:
+            from .cloudflare_forwarding import reconcile_container_forwarding_ip
+
+            forwarding_ip_updated = reconcile_container_forwarding_ip(
+                child_device_id,
+                proxmox=proxmox,
+                node=node,
+                lease_attempts=6,
+                lease_retry_seconds=1.0,
+            )
+        except Exception:
+            logger.warning(
+                "Unable to reconcile exposed IP after starting container device_id=%s vmid=%s",
+                child_device_id,
+                vmid,
+                exc_info=True,
+            )
+
         infra = get_infra_snapshot()
         return {
             "event": "proxmox_container_action",
@@ -4981,7 +5000,10 @@ class StartProxmoxContainerHandler(SyncHandler):
             "success": True,
             "ctid": str(vmid),
             "message": f"Started container {vmid} in {elapsed:.1f}s.",
-            "details": {"exitstatus": status.get("exitstatus")},
+            "details": {
+                "exitstatus": status.get("exitstatus"),
+                "forwarding_ip_updated": forwarding_ip_updated,
+            },
             "status": status.get("status"),
             "infra": infra,
         }
