@@ -1748,9 +1748,9 @@ def _reserve_container_resources(payload: Dict[str, Any], *, device_id: str, req
         available_disk = summary.get("available_disk_gib")
         if available_disk is not None and disk_gib > available_disk:
             raise RuntimeError("Not enough disk space to create this container.")
-        available_cpu = summary.get("available_cpu_share")
-        if available_cpu is not None and cpu_share > available_cpu:
-            raise RuntimeError("Not enough CPU capacity to create this container.")
+        # CPU is oversubscribed by design. Keep the requested share in the
+        # reservation/inventory for accounting, but RAM and disk are the only
+        # consumable resources that can reject provisioning.
 
         _MANAGED_CONTAINERS_STATE["pending"][reservation_id] = {
             "reservation_id": reservation_id,
@@ -4186,7 +4186,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
             reservation_id = _run_lifecycle_step(
                 "reserve_resources",
                 "Reserving capacity",
-                "Reserving CPU, RAM, and disk capacity…",
+                "Reserving RAM and disk capacity…",
                 "Capacity reserved.",
                 lambda: _reserve_container_resources(
                     payload, device_id=device_id, request_id=request_id

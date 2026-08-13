@@ -25,11 +25,39 @@ from portacode.connection.handlers.proxmox_infra import (
     _pinned_portacode_install_command,
     _running_portacode_version_is_prerelease,
     _require_successful_proxmox_task,
+    _reserve_container_resources,
     _sanitize_project_paths,
 )
 
 
 class ProxmoxInfraHandlerTests(TestCase):
+    def test_cpu_can_be_oversubscribed_when_ram_and_disk_are_available(self):
+        state = {
+            "initialized": True,
+            "base_summary": {
+                "available_ram_mib": 4096,
+                "available_disk_gib": 20,
+                "available_cpu_share": 0,
+                "allocated_ram_mib": 0,
+                "allocated_disk_gib": 0,
+                "allocated_cpu_share": 4,
+            },
+            "initial_totals": {"ram_mib": 0, "disk_gib": 0, "cpu_share": 0},
+            "records": {},
+            "pending": {},
+        }
+        with patch(
+            "portacode.connection.handlers.proxmox_infra._MANAGED_CONTAINERS_STATE", state
+        ):
+            reservation_id = _reserve_container_resources(
+                {"ram_mib": 1024, "disk_gib": 3, "cpus": 2},
+                device_id="123",
+                request_id="request",
+            )
+
+        self.assertIn(reservation_id, state["pending"])
+        self.assertEqual(state["pending"][reservation_id]["cpu_share"], 2)
+
     @patch("portacode.connection.handlers.proxmox_infra._load_provisioning_templates")
     @patch("portacode.connection.handlers.proxmox_infra._get_node_from_config", return_value="pve")
     @patch("portacode.connection.handlers.proxmox_infra._connect_proxmox")
