@@ -1044,21 +1044,27 @@ def _pick_container_disk_gib(kind: str, cfg: Dict[str, Any], entry: Dict[str, An
     return 0.0
 
 
-def _to_mib(value: Any) -> float:
+def _configured_memory_mib(value: Any) -> float:
     try:
         val = float(value)
     except (TypeError, ValueError):
         return 0.0
-    if val <= 0:
-        return 0.0
-    # Heuristic: large values are bytes, smaller ones are already MiB.
-    return _bytes_to_mib(val) if val > 10000 else val
+    return val if val > 0 else 0.0
 
 
 def _pick_container_ram_mib(kind: str, cfg: Dict[str, Any], entry: Dict[str, Any]) -> float:
-    for candidate in (cfg.get("memory"), entry.get("maxmem"), entry.get("mem")):
-        ram = _to_mib(candidate)
-        if ram:
+    # Proxmox config endpoints report `memory` in MiB, while cluster/resource
+    # list fields (`maxmem` and `mem`) are bytes. Do not infer units from the
+    # magnitude: valid configurations commonly exceed 10,000 MiB.
+    configured = _configured_memory_mib(cfg.get("memory"))
+    if configured:
+        return configured
+    for key in ("maxmem", "mem"):
+        value = entry.get(key)
+        if value is None:
+            continue
+        ram = _bytes_to_mib(value)
+        if ram > 0:
             return ram
     return 0.0
 

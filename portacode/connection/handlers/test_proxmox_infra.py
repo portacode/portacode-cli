@@ -16,6 +16,7 @@ from portacode.connection.handlers.proxmox_infra import (
     _enforce_service_venv_execstart,
     _get_provisioning_user_info,
     _instantiate_container,
+    _pick_container_ram_mib,
     _legacy_cache_archive_matches,
     _remove_legacy_cache_archives,
     _list_templates,
@@ -35,6 +36,22 @@ from portacode.connection.handlers.proxmox_infra import (
 
 
 class ProxmoxInfraHandlerTests(TestCase):
+    def test_container_config_memory_is_always_mib_even_above_10000(self):
+        self.assertEqual(
+            _pick_container_ram_mib("lxc", {"memory": 32768}, {"maxmem": 34359738368}),
+            32768,
+        )
+
+    def test_container_list_memory_fallback_is_bytes(self):
+        self.assertEqual(
+            _pick_container_ram_mib("lxc", {}, {"maxmem": 34359738368}),
+            32768,
+        )
+        self.assertEqual(
+            _pick_container_ram_mib("lxc", {}, {"mem": 536870912}),
+            512,
+        )
+
     def test_cache_template_names_are_human_readable_and_fixed_size(self):
         source = "local:vztmpl/alpine-3.17-default_20221129_amd64.tar.xz"
 
