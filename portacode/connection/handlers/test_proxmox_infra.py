@@ -232,7 +232,7 @@ class ProxmoxInfraHandlerTests(TestCase):
         proxmox = MagicMock()
         node_api = proxmox.nodes.return_value
         node_api.lxc.get.return_value = [
-            {"vmid": 144, "name": "managed", "status": "running"},
+            {"vmid": 144, "name": "managed-live", "status": "stopped", "disk": 6 * 1024**3},
             {"vmid": 9000, "name": "cache", "status": "stopped"},
         ]
         node_api.qemu.get.return_value = []
@@ -264,7 +264,7 @@ class ProxmoxInfraHandlerTests(TestCase):
             "vmid": 9000, "source_template": "ubuntu.tar.zst", "cache_id": "v2", "status": "ready",
         }]
         records = [
-            {"vmid": 144, "device_id": "42", "hostname": "managed", "disk_gib": 32, "ram_mib": 2048, "cpus": 2},
+            {"vmid": 144, "device_id": "42", "hostname": "managed-stale", "disk_gib": 99, "ram_mib": 4096, "cpus": 8},
             {"vmid": 155, "device_id": "43", "hostname": "missing", "disk_gib": 8, "ram_mib": 512, "cpus": 1},
         ]
 
@@ -275,6 +275,12 @@ class ProxmoxInfraHandlerTests(TestCase):
 
         self.assertEqual(summary["inventory_schema_version"], 2)
         self.assertEqual(summary["containers"][0]["provisioning_id"], "abc")
+        self.assertEqual(summary["containers"][0]["hostname"], "managed-live")
+        self.assertEqual(summary["containers"][0]["status"], "stopped")
+        self.assertEqual(summary["containers"][0]["ram_mib"], 2048)
+        self.assertEqual(summary["containers"][0]["disk_gib"], 32)
+        self.assertEqual(summary["containers"][0]["disk_used_gib"], 6)
+        self.assertEqual(summary["containers"][0]["cpu_share"], 2)
         self.assertEqual(summary["templates"][0]["vmid"], "9000")
         self.assertEqual(summary["missing_containers"][0]["device_id"], "43")
         self.assertEqual(summary["storages"][0]["available_gib"], 75.0)

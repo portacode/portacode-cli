@@ -1044,6 +1044,17 @@ def _pick_container_disk_gib(kind: str, cfg: Dict[str, Any], entry: Dict[str, An
     return 0.0
 
 
+def _pick_container_disk_used_gib(entry: Dict[str, Any]) -> Optional[float]:
+    """Return Proxmox's current guest-volume usage when the API reports it."""
+    value = entry.get("disk")
+    if value is None:
+        return None
+    try:
+        return _bytes_to_gib(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _configured_memory_mib(value: Any) -> float:
     try:
         val = float(value)
@@ -1492,6 +1503,7 @@ def _build_managed_containers_summary(records: List[Dict[str, Any]]) -> Dict[str
                 "template": record.get("template"),
                 "storage": record.get("storage"),
                 "disk_gib": disk_gib,
+                "disk_used_gib": record.get("disk_used_gib"),
                 "ram_mib": ram_mib,
                 "cpu_share": cpu_share,
                 "created_at": record.get("created_at"),
@@ -1619,6 +1631,7 @@ def _build_full_container_summary(records: List[Dict[str, Any]], config: Dict[st
                 "status": (entry.get("status") or "unknown").lower(),
                 "storage": storage,
                 "disk_gib": disk_gib,
+                "disk_used_gib": _pick_container_disk_used_gib(entry),
                 "ram_mib": ram_mib,
                 "cpu_share": cpu_share,
                 "reserve_on_boot": reserve_on_boot,
@@ -1790,8 +1803,15 @@ def _compose_managed_containers_summary(
             continue
         base_entry = base_by_vmid.get(vmid) if vmid is not None else None
         if base_entry:
+            # Proxmox is authoritative for every mutable runtime/configuration
+            # field.  The durable record exists to retain Portacode identity and
+            # history, not to overwrite a reconciliation scan with provisioning-
+            # time RAM, disk, CPU, status, hostname, or placement values.
             merged = base_entry.copy()
             merged.update(entry)
+            for identity_key in ("device_id", "provisioning_id", "template", "created_at"):
+                if base_entry.get(identity_key) not in (None, ""):
+                    merged[identity_key] = base_entry[identity_key]
         else:
             merged = entry.copy()
             merged.setdefault("managed", True)
@@ -1803,15 +1823,15 @@ def _compose_managed_containers_summary(
         merged_containers.append(merged)
     summary["updated_at"] = managed_summary["updated_at"]
     summary["count"] = managed_summary["count"]
-    summary["total_ram_mib"] = managed_summary["total_ram_mib"]
-    summary["total_disk_gib"] = managed_summary["total_disk_gib"]
-    summary["total_cpu_share"] = managed_summary["total_cpu_share"]
+    summary["total_ram_mib"] = int(sum(item.get("ram_mib") or 0 for item in merged_containers))
+    summary["total_disk_gib"] = int(sum(item.get("disk_gib") or 0 for item in merged_containers))
+    summary["total_cpu_share"] = round(sum(item.get("cpu_share") or 0 for item in merged_containers), 2)
     summary["containers"] = merged_containers
 
     pending_ram, pending_disk, pending_cpu = _pending_totals(pending)
-    delta_ram = managed_summary["total_ram_mib"] - int(initial_totals.get("ram_mib") or 0)
-    delta_disk = managed_summary["total_disk_gib"] - int(initial_totals.get("disk_gib") or 0)
-    delta_cpu = managed_summary["total_cpu_share"] - float(initial_totals.get("cpu_share") or 0.0)
+    delta_ram = summary["total_ram_mib"] - int(initial_totals.get("ram_mib") or 0)
+    delta_disk = summary["total_disk_gib"] - int(initial_totals.get("disk_gib") or 0)
+    delta_cpu = summary["total_cpu_share"] - float(initial_totals.get("cpu_share") or 0.0)
 
     if "allocated_ram_mib" in summary and summary.get("allocated_ram_mib") is not None:
         summary["allocated_ram_mib"] = round(float(summary["allocated_ram_mib"]) + delta_ram + pending_ram, 2)
