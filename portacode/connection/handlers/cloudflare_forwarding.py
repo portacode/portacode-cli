@@ -10,6 +10,7 @@ import re
 import subprocess
 import threading
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -57,6 +58,16 @@ GLOBAL_SHELL_HOOK_PATHS = (
 )
 MANAGED_BLOCK_BEGIN = "# >>> PORTACODE_EXPOSED_SERVICES >>>"
 MANAGED_BLOCK_END = "# <<< PORTACODE_EXPOSED_SERVICES <<<"
+
+
+def _timed_stage(operation_id: str, stage: str, started: float, **details: Any) -> None:
+    logger.info(
+        "Expose ports timing operation_id=%s stage=%s elapsed_s=%.3f details=%s",
+        operation_id,
+        stage,
+        time.monotonic() - started,
+        details,
+    )
 
 def _is_root() -> bool:
     return hasattr(os, "geteuid") and os.geteuid() == 0
@@ -301,10 +312,16 @@ def _route_dns(hostnames: List[str], tunnel_name: str) -> None:
         if hostname in seen:
             continue
         seen.add(hostname)
+        started = time.monotonic()
         try:
             _call_subprocess(
                 ["cloudflared", "tunnel", "route", "dns", "--overwrite-dns", tunnel_name, hostname],
                 check=True,
+            )
+            logger.info(
+                "Expose ports timing stage=route_dns hostname=%s elapsed_s=%.3f",
+                hostname,
+                time.monotonic() - started,
             )
         except subprocess.CalledProcessError as exc:
             stderr = (getattr(exc, "stderr", "") or "").strip()
@@ -318,7 +335,14 @@ def _route_dns(hostnames: List[str], tunnel_name: str) -> None:
 
 def _reload_cloudflared_service() -> None:
     # Restart via init-system aware logic; sudo/root handled inside.
-    restart_service()
+    started = time.monotonic()
+    try:
+        restart_service()
+    finally:
+        logger.info(
+            "Expose ports timing stage=reload_cloudflared elapsed_s=%.3f",
+            time.monotonic() - started,
+        )
 
 
 def _load_tunnel_state() -> Dict[str, Any]:
@@ -349,20 +373,34 @@ def _apply_and_persist_forwarding_rules(
     if not domain or not tunnel_name:
         raise RuntimeError("Cloudflare domain or tunnel name missing from state.")
 
+    operation_id = f"apply-{time.monotonic_ns()}"
+    total_started = time.monotonic()
     requires_proxmox = any(rule["parsed"]["type"] == "device" for rule in rules)
     proxmox = node = None
     if requires_proxmox:
         infra_config = _ensure_infra_configured()
         proxmox = _connect_proxmox(infra_config)
         node = _get_node_from_config(infra_config)
+    _timed_stage(operation_id, "connect_proxmox", total_started, required=requires_proxmox)
 
+    started = time.monotonic()
     entries = _build_ingress_entries(rules, proxmox, node)
+    _timed_stage(operation_id, "build_ingress_entries", started, rule_count=len(rules))
+    started = time.monotonic()
     _write_cloudflared_config(tunnel_state, entries)
+    _timed_stage(operation_id, "write_cloudflared_config", started, entry_count=len(entries))
     hostnames = [entry["hostname"] for entry in entries if entry.get("hostname")]
     if hostnames:
+        started = time.monotonic()
         _route_dns(hostnames, tunnel_name)
+        _timed_stage(operation_id, "route_dns_all", started, hostname_count=len(hostnames))
+    started = time.monotonic()
     _reload_cloudflared_service()
+    _timed_stage(operation_id, "reload_cloudflared_call", started)
+    started = time.monotonic()
     state = persist_forwarding_state(rules)
+    _timed_stage(operation_id, "persist_forwarding_state", started, rule_count=len(rules))
+    _timed_stage(operation_id, "apply_total", total_started, rule_count=len(rules))
     return {
         "rules": _sanitize_rules(rules),
         "updated_at": state.get("updated_at"),
@@ -414,18 +452,48 @@ def _push_root_file_to_container(vmid: int, path: str, data: bytes, mode: int = 
     try:
         parent = str(Path(path).parent)
         if parent not in {"", ".", "/"}:
+            started = time.monotonic()
             _run_pct_exec_check(vmid, ["mkdir", "-p", parent])
+            logger.info(
+                "Expose ports timing stage=pct_mkdir vmid=%s elapsed_s=%.3f",
+                vmid,
+                time.monotonic() - started,
+            )
+            started = time.monotonic()
             _run_pct_exec_check(vmid, ["chown", "root:root", parent])
+            logger.info(
+                "Expose ports timing stage=pct_chown_parent vmid=%s elapsed_s=%.3f",
+                vmid,
+                time.monotonic() - started,
+            )
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
             tmp.write(data)
             tmp.flush()
             os.fsync(tmp.fileno())
             tmp_path = tmp.name
+        started = time.monotonic()
         res = _run_pct_push(vmid, tmp_path, path)
+        logger.info(
+            "Expose ports timing stage=pct_push vmid=%s elapsed_s=%.3f",
+            vmid,
+            time.monotonic() - started,
+        )
         if res.returncode != 0:
             raise RuntimeError(res.stderr or res.stdout or f"pct push returned {res.returncode}")
+        started = time.monotonic()
         _run_pct_exec_check(vmid, ["chown", "root:root", path])
+        logger.info(
+            "Expose ports timing stage=pct_chown_file vmid=%s elapsed_s=%.3f",
+            vmid,
+            time.monotonic() - started,
+        )
+        started = time.monotonic()
         _run_pct_exec_check(vmid, ["chmod", format(mode, "o"), path])
+        logger.info(
+            "Expose ports timing stage=pct_chmod_file vmid=%s elapsed_s=%.3f",
+            vmid,
+            time.monotonic() - started,
+        )
     finally:
         if tmp_path:
             try:
@@ -607,13 +675,29 @@ def _sync_exposed_services_into_container(
     proxmox: Any,
     node: str,
 ) -> None:
+    started = time.monotonic()
     vmid = _resolve_device_vmid(container_device_id, proxmox, node)
+    logger.info(
+        "Expose ports timing stage=resolve_target_vmid device_id=%s vmid=%s elapsed_s=%.3f",
+        container_device_id,
+        vmid,
+        time.monotonic() - started,
+    )
     services_payload = {
         "device_id": container_device_id,
         "exposed_services": exposed_ports,
     }
     json_data = (json.dumps(services_payload, indent=2) + "\n").encode("utf-8")
-    _push_root_file_to_container(vmid, EXPOSED_SERVICES_JSON_PATH, json_data, mode=0o644)
+    started = time.monotonic()
+    try:
+        _push_root_file_to_container(vmid, EXPOSED_SERVICES_JSON_PATH, json_data, mode=0o644)
+    finally:
+        logger.info(
+            "Expose ports timing stage=sync_container_metadata device_id=%s vmid=%s elapsed_s=%.3f",
+            container_device_id,
+            vmid,
+            time.monotonic() - started,
+        )
 
 
 def _rule_targets_container(rule: Dict[str, Any], container_device_id: str, domain: str) -> bool:
@@ -639,12 +723,19 @@ def set_container_forwarding_rules(
     container_device_id: Any,
     container_rules: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    operation_started = time.monotonic()
     tunnel_state = _load_tunnel_state()
     domain = str(tunnel_state.get("domain") or "").strip().lower().rstrip(".")
     normalized_specs = _normalize_container_rule_specs(container_device_id, container_rules)
     normalized_device_id = str(container_device_id).strip()
 
     with _FORWARDING_UPDATE_LOCK:
+        lock_acquired = time.monotonic()
+        logger.info(
+            "Expose ports timing stage=lock_wait device_id=%s elapsed_s=%.3f",
+            normalized_device_id,
+            lock_acquired - operation_started,
+        )
         stored = load_forwarding_state().get("rules", [])
         existing_rules = _normalize_rules(stored, domain, from_storage=True)
         preserved_rules = [
@@ -676,15 +767,27 @@ def set_container_forwarding_rules(
         merged_rules = preserved_rules + new_rules
 
         # Ensure the child container receives updated exposure metadata first.
+        started = time.monotonic()
         infra_config = _ensure_infra_configured()
         proxmox = _connect_proxmox(infra_config)
         node = _get_node_from_config(infra_config)
+        logger.info(
+            "Expose ports timing stage=metadata_connect_proxmox device_id=%s elapsed_s=%.3f",
+            normalized_device_id,
+            time.monotonic() - started,
+        )
         try:
+            started = time.monotonic()
             _sync_exposed_services_into_container(
                 normalized_device_id,
                 exposed_ports,
                 proxmox,
                 node,
+            )
+            logger.info(
+                "Expose ports timing stage=metadata_total device_id=%s elapsed_s=%.3f",
+                normalized_device_id,
+                time.monotonic() - started,
             )
         except Exception:
             if exposed_ports:
@@ -696,6 +799,13 @@ def set_container_forwarding_rules(
             )
 
         persisted = _apply_and_persist_forwarding_rules(merged_rules, tunnel_state=tunnel_state)
+
+    logger.info(
+        "Expose ports timing stage=request_total device_id=%s elapsed_s=%.3f rule_count=%s",
+        normalized_device_id,
+        time.monotonic() - operation_started,
+        len(merged_rules),
+    )
 
     return {
         "device_id": normalized_device_id,
