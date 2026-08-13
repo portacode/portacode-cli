@@ -513,6 +513,15 @@ class TerminalManager:
             self._periodic_provisioning_template_maintenance()
         )
 
+        if getattr(self, "_proxmox_inventory_reconciliation_task", None):
+            try:
+                self._proxmox_inventory_reconciliation_task.cancel()
+            except Exception:
+                pass
+        self._proxmox_inventory_reconciliation_task = asyncio.create_task(
+            self._periodic_proxmox_inventory_reconciliation()
+        )
+
         # Start exposed-services file monitor for realtime updates.
         if getattr(self, "_exposed_services_task", None):
             try:
@@ -685,6 +694,24 @@ class TerminalManager:
             except Exception as exc:
                 logger.exception("Provisioning template maintenance failed: %s", exc)
             await asyncio.sleep(PROVISIONING_MAINTENANCE_INTERVAL_S)
+
+    async def _periodic_proxmox_inventory_reconciliation(self) -> None:
+        """Periodically detect changes made directly through Proxmox."""
+        from .handlers.proxmox_infra import (
+            PROXMOX_INVENTORY_RECONCILE_INTERVAL_S,
+            reconcile_managed_containers_inventory,
+        )
+
+        while True:
+            await asyncio.sleep(PROXMOX_INVENTORY_RECONCILE_INTERVAL_S)
+            try:
+                result = await asyncio.to_thread(reconcile_managed_containers_inventory)
+                if result.get("reason") == "state_changed":
+                    logger.debug("Discarded Proxmox inventory scan after concurrent state change")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Proxmox inventory reconciliation failed safely: %s", exc)
 
     def _read_exposed_services_snapshot(self) -> Dict[str, Any]:
         path = EXPOSED_SERVICES_MONITOR_PATH

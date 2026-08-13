@@ -53,6 +53,7 @@ CACHE_SOURCE_MARKER = "cache_source="
 CACHE_PARENT_MARKER = "cache_parent="
 _PROVISIONING_MAINTENANCE_LAST_RUN = 0.0
 PROVISIONING_MAINTENANCE_INTERVAL_S = 300
+PROXMOX_INVENTORY_RECONCILE_INTERVAL_S = 300
 # Keep reusable roots small while leaving enough room for the OS, Portacode,
 # Codex, and (on apt systems) Playwright Chromium to be installed. A request
 # below this size still builds at its requested size; if the software cannot
@@ -154,6 +155,7 @@ _MANAGED_CONTAINERS_STATE: Dict[str, Any] = {
     "initial_totals": {"ram_mib": 0, "disk_gib": 0, "cpu_share": 0.0},
     "records": {},
     "pending": {},
+    "revision": 0,
 }
 TEMPLATES_REFRESH_INTERVAL_S = 300
 _TEMPLATE_CACHE_LOCK = threading.Lock()
@@ -1340,7 +1342,45 @@ def _initialize_managed_containers_state(force: bool = False) -> Dict[str, Any]:
         _MANAGED_CONTAINERS_STATE["initial_totals"] = initial_totals
         _MANAGED_CONTAINERS_STATE["records"] = record_map
         _MANAGED_CONTAINERS_STATE["pending"] = {}
+        _MANAGED_CONTAINERS_STATE["revision"] = int(
+            _MANAGED_CONTAINERS_STATE.get("revision") or 0
+        ) + 1
     return _copy_summary(base_summary)
+
+
+def reconcile_managed_containers_inventory() -> Dict[str, Any]:
+    """Refresh Proxmox inventory without blocking or racing provisioning.
+
+    The comparatively expensive Proxmox API scan runs outside the state lock.
+    A revision check makes the final swap conditional: if a managed create,
+    delete, or record update occurred during the scan, the stale result is
+    discarded and the next periodic pass retries it. Pending reservations are
+    never replaced by reconciliation.
+    """
+    _initialize_managed_containers_state()
+    with _MANAGED_CONTAINERS_STATE_LOCK:
+        revision = int(_MANAGED_CONTAINERS_STATE.get("revision") or 0)
+        records = [record.copy() for record in _MANAGED_CONTAINERS_STATE.get("records", {}).values()]
+
+    config = _load_config()
+    if not config:
+        return {"refreshed": False, "reason": "not_configured"}
+    refreshed_summary = _build_full_container_summary(records, config)
+    refreshed_totals = {
+        "ram_mib": int(refreshed_summary.get("total_ram_mib") or 0),
+        "disk_gib": int(refreshed_summary.get("total_disk_gib") or 0),
+        "cpu_share": float(refreshed_summary.get("total_cpu_share") or 0.0),
+    }
+
+    with _MANAGED_CONTAINERS_STATE_LOCK:
+        if int(_MANAGED_CONTAINERS_STATE.get("revision") or 0) != revision:
+            return {"refreshed": False, "reason": "state_changed"}
+        _MANAGED_CONTAINERS_STATE["base_summary"] = refreshed_summary
+        _MANAGED_CONTAINERS_STATE["initial_totals"] = refreshed_totals
+    return {
+        "refreshed": True,
+        "inventory_updated_at": refreshed_summary.get("inventory_updated_at"),
+    }
 
 
 def _load_managed_container_records() -> List[Dict[str, Any]]:
@@ -1668,10 +1708,17 @@ def _compose_managed_containers_summary(
         for entry in base_summary.get("containers", [])
         if entry.get("vmid") is not None
     }
+    missing_vmids = {
+        str(entry.get("vmid"))
+        for entry in base_summary.get("missing_containers", [])
+        if entry.get("vmid") is not None
+    }
     default_storage = summary.get("default_storage")
     merged_containers: List[Dict[str, Any]] = []
     for entry in managed_summary["containers"]:
         vmid = str(entry.get("vmid")) if entry.get("vmid") is not None else None
+        if vmid in missing_vmids:
+            continue
         base_entry = base_by_vmid.get(vmid) if vmid is not None else None
         if base_entry:
             merged = base_entry.copy()
@@ -2832,12 +2879,18 @@ def _register_container_record(vmid: int, payload: Dict[str, Any], reservation_i
         if reservation_id:
             _MANAGED_CONTAINERS_STATE["pending"].pop(reservation_id, None)
         _MANAGED_CONTAINERS_STATE["records"][str(vmid)] = payload.copy()
+        _MANAGED_CONTAINERS_STATE["revision"] = int(
+            _MANAGED_CONTAINERS_STATE.get("revision") or 0
+        ) + 1
 
 
 def _unregister_container_record(vmid: int) -> None:
     _initialize_managed_containers_state()
     with _MANAGED_CONTAINERS_STATE_LOCK:
         _MANAGED_CONTAINERS_STATE["records"].pop(str(vmid), None)
+        _MANAGED_CONTAINERS_STATE["revision"] = int(
+            _MANAGED_CONTAINERS_STATE.get("revision") or 0
+        ) + 1
 
 
 def _write_container_record(vmid: int, payload: Dict[str, Any], reservation_id: Optional[str] = None) -> None:

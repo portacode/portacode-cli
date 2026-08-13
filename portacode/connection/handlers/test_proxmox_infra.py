@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 from portacode.connection.handlers.proxmox_infra import (
     RemoveProxmoxContainerHandler,
     _build_full_container_summary,
+    _compose_managed_containers_summary,
     _build_bootstrap_steps,
     _cacheable_bootstrap_steps,
     _claim_ctid_for_reservation,
@@ -26,11 +27,69 @@ from portacode.connection.handlers.proxmox_infra import (
     _running_portacode_version_is_prerelease,
     _require_successful_proxmox_task,
     _reserve_container_resources,
+    reconcile_managed_containers_inventory,
     _sanitize_project_paths,
 )
 
 
 class ProxmoxInfraHandlerTests(TestCase):
+    def test_reconciled_external_deletion_is_not_reinserted_from_local_record(self):
+        summary = _compose_managed_containers_summary(
+            [{"vmid": 144, "device_id": "42", "ram_mib": 2048, "disk_gib": 14, "cpus": 1}],
+            [],
+            {
+                "containers": [],
+                "missing_containers": [{"vmid": "144", "device_id": "42"}],
+                "allocated_ram_mib": 0,
+                "allocated_disk_gib": 0,
+                "allocated_cpu_share": 0,
+            },
+            {"ram_mib": 2048, "disk_gib": 14, "cpu_share": 1},
+        )
+
+        self.assertEqual(summary["containers"], [])
+        self.assertEqual(summary["missing_containers"][0]["vmid"], "144")
+
+    @patch("portacode.connection.handlers.proxmox_infra._build_full_container_summary")
+    @patch("portacode.connection.handlers.proxmox_infra._load_config", return_value={"node": "pve"})
+    def test_reconciliation_atomically_replaces_inventory_baseline(self, _config, build_summary):
+        refreshed = {"inventory_updated_at": "new", "total_ram_mib": 2, "total_disk_gib": 3, "total_cpu_share": 1}
+        build_summary.return_value = refreshed
+        state = {
+            "initialized": True, "base_summary": {"inventory_updated_at": "old"},
+            "initial_totals": {}, "records": {"144": {"vmid": 144}},
+            "pending": {"reservation": {"ram_mib": 1}}, "revision": 4,
+        }
+        with patch("portacode.connection.handlers.proxmox_infra._MANAGED_CONTAINERS_STATE", state):
+            result = reconcile_managed_containers_inventory()
+
+        self.assertTrue(result["refreshed"])
+        self.assertIs(state["base_summary"], refreshed)
+        self.assertIn("reservation", state["pending"])
+        self.assertEqual(state["revision"], 4)
+
+    @patch("portacode.connection.handlers.proxmox_infra._load_config", return_value={"node": "pve"})
+    def test_reconciliation_discards_scan_when_managed_state_changes(self, _config):
+        state = {
+            "initialized": True, "base_summary": {"inventory_updated_at": "old"},
+            "initial_totals": {}, "records": {"144": {"vmid": 144}},
+            "pending": {}, "revision": 7,
+        }
+
+        def concurrent_scan(_records, _config):
+            state["records"]["145"] = {"vmid": 145}
+            state["revision"] += 1
+            return {"inventory_updated_at": "stale scan"}
+
+        with patch("portacode.connection.handlers.proxmox_infra._MANAGED_CONTAINERS_STATE", state), patch(
+            "portacode.connection.handlers.proxmox_infra._build_full_container_summary",
+            side_effect=concurrent_scan,
+        ):
+            result = reconcile_managed_containers_inventory()
+
+        self.assertEqual(result, {"refreshed": False, "reason": "state_changed"})
+        self.assertEqual(state["base_summary"]["inventory_updated_at"], "old")
+
     def test_cpu_can_be_oversubscribed_when_ram_and_disk_are_available(self):
         state = {
             "initialized": True,
