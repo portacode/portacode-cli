@@ -286,6 +286,30 @@ class ProxmoxInfraHandlerTests(TestCase):
         steps = _build_bootstrap_steps("svcuser", "pass", "", include_portacode_connect=False)
         self.assertFalse(any(step.get("name") == "portacode_connect" for step in steps))
 
+    def test_all_package_manager_profiles_install_git_system_wide(self):
+        for manager in ("apt", "dnf", "yum", "apk", "pacman", "zypper"):
+            with self.subTest(manager=manager, path="cache"):
+                install_step = next(
+                    step
+                    for step in _cacheable_bootstrap_steps(manager)
+                    if step["name"] == "install_deps"
+                )
+                self.assertRegex(install_step["cmd"], r"(?:^|\s)git(?:\s|$)")
+
+            with self.subTest(manager=manager, path="direct"):
+                install_step = next(
+                    step
+                    for step in _build_bootstrap_steps(
+                        "svcuser",
+                        "pass",
+                        "",
+                        include_portacode_connect=False,
+                        package_manager=manager,
+                    )
+                    if step["name"] == "install_deps"
+                )
+                self.assertRegex(install_step["cmd"], r"(?:^|\s)git(?:\s|$)")
+
     def test_legacy_cleanup_namespace_does_not_match_unrelated_backups(self):
         self.assertTrue(
             _legacy_cache_archive_matches(

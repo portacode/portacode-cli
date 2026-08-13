@@ -2491,7 +2491,7 @@ _PACKAGE_MANAGER_PROFILES: Dict[str, Dict[str, Any]] = {
     "apt": {
         "update_cmd": "apt-get update -y || test $? -eq 100",
         "update_step_name": "apt_update",
-        "install_cmd": "apt-get install -y python3 python3-pip python3-venv sudo --fix-missing",
+        "install_cmd": "apt-get install -y python3 python3-pip python3-venv sudo git --fix-missing",
         "install_step_name": "install_deps",
         "update_retries": 4,
         "install_retries": 5,
@@ -2499,7 +2499,7 @@ _PACKAGE_MANAGER_PROFILES: Dict[str, Dict[str, Any]] = {
     "dnf": {
         "update_cmd": "dnf check-update || true",
         "update_step_name": "dnf_update",
-        "install_cmd": "dnf install -y python3 python3-pip sudo",
+        "install_cmd": "dnf install -y python3 python3-pip sudo git",
         "install_step_name": "install_deps",
         "update_retries": 3,
         "install_retries": 5,
@@ -2507,7 +2507,7 @@ _PACKAGE_MANAGER_PROFILES: Dict[str, Dict[str, Any]] = {
     "yum": {
         "update_cmd": "yum makecache",
         "update_step_name": "yum_update",
-        "install_cmd": "yum install -y python3 python3-pip sudo",
+        "install_cmd": "yum install -y python3 python3-pip sudo git",
         "install_step_name": "install_deps",
         "update_retries": 3,
         "install_retries": 5,
@@ -2515,7 +2515,7 @@ _PACKAGE_MANAGER_PROFILES: Dict[str, Dict[str, Any]] = {
     "apk": {
         "update_cmd": "apk update",
         "update_step_name": "apk_update",
-        "install_cmd": "apk add --no-cache python3 py3-pip sudo shadow",
+        "install_cmd": "apk add --no-cache python3 py3-pip sudo shadow git",
         "install_step_name": "install_deps",
         "update_retries": 3,
         "install_retries": 5,
@@ -2523,7 +2523,7 @@ _PACKAGE_MANAGER_PROFILES: Dict[str, Dict[str, Any]] = {
     "pacman": {
         "update_cmd": "pacman -Sy --noconfirm",
         "update_step_name": "pacman_update",
-        "install_cmd": "pacman -S --noconfirm python python-pip sudo",
+        "install_cmd": "pacman -S --noconfirm python python-pip sudo git",
         "install_step_name": "install_deps",
         "update_retries": 3,
         "install_retries": 5,
@@ -2532,10 +2532,10 @@ _PACKAGE_MANAGER_PROFILES: Dict[str, Dict[str, Any]] = {
         "update_cmd": "zypper --non-interactive --gpg-auto-import-keys refresh",
         "update_step_name": "zypper_update",
         "install_cmd": (
-            "zypper --non-interactive install -y python3 python3-pip python3-virtualenv sudo "
-            "|| zypper --non-interactive install -y python311 python311-pip python311-virtualenv sudo "
-            "|| zypper --non-interactive install -y python311 python311-pip sudo "
-            "|| zypper --non-interactive install -y python3 python3-pip sudo"
+            "zypper --non-interactive install -y python3 python3-pip python3-virtualenv sudo git "
+            "|| zypper --non-interactive install -y python311 python311-pip python311-virtualenv sudo git "
+            "|| zypper --non-interactive install -y python311 python311-pip sudo git "
+            "|| zypper --non-interactive install -y python3 python3-pip sudo git"
         ),
         "install_step_name": "install_deps",
         "update_retries": 3,
