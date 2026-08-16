@@ -11,6 +11,10 @@ import subprocess
 import threading
 import tempfile
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -29,6 +33,7 @@ from .proxmox_infra import (
     _resolve_vmid_for_device_in_proxmox,
 )
 from portacode.tunneling.forwarding_state import load_forwarding_state, persist_forwarding_state
+from portacode.tunneling.get_domain import extract_token_json
 from portacode.tunneling.state import default_config_path, load_state
 from portacode.tunneling.privileged import write_text
 from portacode.tunneling.service_install import restart_service
@@ -223,10 +228,10 @@ def _resolve_service_endpoint(
     if device_id in cache:
         ip = cache[device_id]
     else:
-        vmid = _resolve_device_vmid(device_id, proxmox, node)
         try:
+            vmid = _resolve_device_vmid(device_id, proxmox, node)
             ip = _find_container_ip(proxmox, node, vmid, leases)
-        except RuntimeError:
+        except (_DeviceLookupError, RuntimeError):
             ip = str(parsed.get("resolved_ip") or "").strip()
             if not ip:
                 raise
@@ -353,6 +358,7 @@ def _write_cloudflared_config(state: Dict[str, Any], entries: List[Dict[str, Any
 
 
 def _route_dns(hostnames: List[str], tunnel_name: str) -> None:
+    """Compatibility fallback for nodes whose API credential cannot edit DNS."""
     seen = set()
     for hostname in hostnames:
         if hostname in seen:
@@ -377,6 +383,141 @@ def _route_dns(hostnames: List[str], tunnel_name: str) -> None:
             raise RuntimeError(
                 f"cloudflared route dns failed for {hostname!r} (tunnel={tunnel_name!r}): {details}"
             ) from exc
+
+
+def _cloudflare_api_request(
+    method: str,
+    path: str,
+    *,
+    api_token: str,
+    payload: Dict[str, Any] | None = None,
+) -> Any:
+    body = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request = urllib.request.Request(
+        f"https://api.cloudflare.com/client/v4{path}",
+        data=body,
+        method=method,
+        headers={
+            "Authorization": f"Bearer {api_token}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            response_data = json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Cloudflare DNS API request failed: {exc}") from exc
+    if not response_data.get("success"):
+        errors = response_data.get("errors") or []
+        message = errors[0].get("message") if errors else "unknown API error"
+        raise RuntimeError(f"Cloudflare DNS API error: {message}")
+    return response_data.get("result")
+
+
+def _upsert_tunnel_dns_record(
+    hostname: str,
+    *,
+    zone_id: str,
+    api_token: str,
+    tunnel_id: str,
+) -> str:
+    query = urllib.parse.urlencode({"name": hostname, "per_page": 100})
+    records = _cloudflare_api_request(
+        "GET",
+        f"/zones/{zone_id}/dns_records?{query}",
+        api_token=api_token,
+    )
+    existing = records[0] if isinstance(records, list) and records else None
+    desired = {
+        "type": "CNAME",
+        "name": hostname,
+        "content": f"{tunnel_id}.cfargotunnel.com",
+        "proxied": True,
+        "ttl": 1,
+    }
+    if existing:
+        matches = (
+            str(existing.get("type") or "").upper() == desired["type"]
+            and str(existing.get("content") or "").rstrip(".").lower()
+            == desired["content"].lower()
+            and bool(existing.get("proxied"))
+        )
+        if matches:
+            return "unchanged"
+        record_id = str(existing.get("id") or "").strip()
+        if not record_id:
+            raise RuntimeError(f"Cloudflare DNS record for {hostname!r} has no ID")
+        _cloudflare_api_request(
+            "PUT",
+            f"/zones/{zone_id}/dns_records/{record_id}",
+            api_token=api_token,
+            payload=desired,
+        )
+        return "updated"
+    _cloudflare_api_request(
+        "POST",
+        f"/zones/{zone_id}/dns_records",
+        api_token=api_token,
+        payload=desired,
+    )
+    return "created"
+
+
+def _route_dns_via_api(hostnames: List[str], tunnel_state: Dict[str, Any]) -> None:
+    cert_path = str(tunnel_state.get("cert_path") or "").strip()
+    tunnel_id = str(tunnel_state.get("tunnel_id") or "").strip()
+    if not cert_path or not tunnel_id:
+        raise RuntimeError("Cloudflare certificate or tunnel ID missing from state")
+    credential = extract_token_json(cert_path)
+    zone_id = str(credential.get("zoneID") or "").strip()
+    api_token = str(credential.get("apiToken") or "").strip()
+    if not zone_id or not api_token:
+        raise RuntimeError("Cloudflare zone/API credential missing from certificate")
+
+    unique_hostnames = list(dict.fromkeys(hostnames))
+    failures: List[str] = []
+    with ThreadPoolExecutor(max_workers=min(4, len(unique_hostnames))) as executor:
+        futures = {
+            executor.submit(
+                _upsert_tunnel_dns_record,
+                hostname,
+                zone_id=zone_id,
+                api_token=api_token,
+                tunnel_id=tunnel_id,
+            ): hostname
+            for hostname in unique_hostnames
+        }
+        for future in as_completed(futures):
+            hostname = futures[future]
+            try:
+                action = future.result()
+                logger.info("Cloudflare DNS API hostname=%s action=%s", hostname, action)
+            except Exception as exc:
+                failures.append(f"{hostname}: {exc}")
+    if failures:
+        raise RuntimeError("; ".join(failures))
+
+
+def _route_new_dns(hostnames: List[str], tunnel_state: Dict[str, Any]) -> None:
+    if not hostnames:
+        return
+    started = time.monotonic()
+    try:
+        _route_dns_via_api(hostnames, tunnel_state)
+        method = "api"
+    except Exception as exc:
+        logger.warning(
+            "Direct Cloudflare DNS update failed; using cloudflared fallback: %s",
+            exc,
+        )
+        _route_dns(hostnames, str(tunnel_state.get("tunnel_name") or ""))
+        method = "cloudflared"
+    logger.info(
+        "Expose ports timing stage=route_dns_all method=%s hostname_count=%s elapsed_s=%.3f",
+        method,
+        len(hostnames),
+        time.monotonic() - started,
+    )
 
 
 def _reload_cloudflared_service() -> None:
@@ -412,21 +553,6 @@ def _sanitize_rules(rules: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     return sanitized
 
 
-def _node_device_id(tunnel_state: Dict[str, Any]) -> str:
-    explicit = str(tunnel_state.get("node_device_id") or "").strip()
-    if explicit.isdigit():
-        return explicit
-    match = re.fullmatch(r"portacode-proxmox-(\d+)", str(tunnel_state.get("tunnel_name") or ""))
-    if not match:
-        raise RuntimeError("Unable to determine node device ID for wildcard forwarding")
-    return match.group(1)
-
-
-def _wildcard_hostname(tunnel_state: Dict[str, Any]) -> str:
-    domain = str(tunnel_state.get("domain") or "").strip().lower().rstrip(".")
-    return f"*.{_node_device_id(tunnel_state)}.{domain}"
-
-
 def _apply_and_persist_forwarding_rules(
     rules: List[Dict[str, Any]],
     *,
@@ -455,24 +581,57 @@ def _apply_and_persist_forwarding_rules(
     started = time.monotonic()
     entries = _build_ingress_entries(rules, proxmox, node)
     _timed_stage(operation_id, "build_ingress_entries", started, rule_count=len(rules))
-    started = time.monotonic()
-    _write_cloudflared_config(tunnel_state, entries)
-    _timed_stage(operation_id, "write_cloudflared_config", started, entry_count=len(entries))
     forwarding_state = load_forwarding_state()
-    desired_wildcard = _wildcard_hostname(tunnel_state)
-    provisioned_wildcard = str(forwarding_state.get("wildcard_dns_hostname") or "")
-    hostnames = [] if provisioned_wildcard == desired_wildcard else [desired_wildcard]
-    if hostnames:
+    existing_hostnames = {
+        str(rule.get("hostname") or "").strip().lower().rstrip(".")
+        for rule in forwarding_state.get("rules", [])
+        if isinstance(rule, dict)
+    }
+    hostnames = [
+        entry["hostname"]
+        for entry in entries
+        if entry.get("hostname")
+        and str(entry["hostname"]).strip().lower().rstrip(".") not in existing_hostnames
+    ]
+
+    cfg = tunnel_state.get("config_path")
+    config_path = Path(str(cfg)) if cfg else Path(default_config_path())
+    try:
+        previous_config = config_path.read_bytes()
+        previous_mode = config_path.stat().st_mode & 0o777
+    except OSError:
+        previous_config = None
+        previous_mode = 0o644
+
+    try:
         started = time.monotonic()
-        _route_dns(hostnames, tunnel_name)
-        _timed_stage(operation_id, "route_dns_all", started, hostname_count=len(hostnames))
+        _write_cloudflared_config(tunnel_state, entries)
+        _timed_stage(operation_id, "write_cloudflared_config", started, entry_count=len(entries))
+        _route_new_dns(hostnames, tunnel_state)
+        started = time.monotonic()
+        _reload_cloudflared_service()
+        _timed_stage(operation_id, "reload_cloudflared_call", started)
+    except Exception:
+        logger.exception(
+            "Forwarding update failed; restoring previous cloudflared config operation_id=%s",
+            operation_id,
+        )
+        if previous_config is not None:
+            try:
+                write_text(
+                    config_path,
+                    previous_config.decode("utf-8"),
+                    mode=previous_mode,
+                )
+                _reload_cloudflared_service()
+            except Exception:
+                logger.exception(
+                    "Failed to restore previous cloudflared config operation_id=%s",
+                    operation_id,
+                )
+        raise
     started = time.monotonic()
-    _reload_cloudflared_service()
-    _timed_stage(operation_id, "reload_cloudflared_call", started)
-    started = time.monotonic()
-    state = persist_forwarding_state(
-        rules, metadata={"wildcard_dns_hostname": desired_wildcard}
-    )
+    state = persist_forwarding_state(rules)
     _timed_stage(operation_id, "persist_forwarding_state", started, rule_count=len(rules))
     _timed_stage(operation_id, "apply_total", total_started, rule_count=len(rules))
     return {
@@ -499,11 +658,16 @@ def _new_container_hostname(
     index: int,
     tunnel_state: Dict[str, Any],
 ) -> str:
-    node_id = _node_device_id(tunnel_state)
     domain = str(tunnel_state.get("domain") or "").strip().lower().rstrip(".")
     protocol_suffix = "-https" if protocol == "https" else ""
     label = device_id if index == 0 else f"{device_id}-{port}{protocol_suffix}"
-    return f"{label}.{node_id}.{domain}"
+    return f"{label}.{domain}"
+
+
+def _is_single_level_hostname(hostname: str, domain: str) -> bool:
+    normalized = str(hostname or "").strip().lower().rstrip(".")
+    suffix = f".{domain}"
+    return normalized.endswith(suffix) and "." not in normalized[: -len(suffix)]
 
 
 def _normalize_container_rule_specs(
@@ -842,7 +1006,8 @@ def set_container_forwarding_rules(
             parsed = rule.get("parsed") or {}
             if parsed.get("type") != "device":
                 continue
-            reusable_hostnames[(int(parsed["port"]), str(parsed["scheme"]))] = rule["hostname"]
+            if _is_single_level_hostname(rule["hostname"], domain):
+                reusable_hostnames[(int(parsed["port"]), str(parsed["scheme"]))] = rule["hostname"]
             recorded_target_ip = str(rule.get("resolved_ip") or recorded_target_ip)
         new_rules: List[Dict[str, Any]] = []
         exposed_ports: List[Dict[str, Any]] = []
