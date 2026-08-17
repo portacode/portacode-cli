@@ -12,6 +12,11 @@ test_results
 logs
 secrets
 
+# Private or separately maintained subprojects
+/server/
+/portacode_for_school/
+/portacode_for_schools/
+
 # Example-generated volumes
 examples/simple_device/data/
 examples/workshop_fleet/data/

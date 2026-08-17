@@ -1,7 +1,15 @@
 # Portacode Python package
 
-This directory contains the implementation of the `portacode` Python package.  
-Most users will interact with the package via the `portacode` command-line tool.
+This directory contains Portacode's optional device-side agent and the
+`portacode` command-line tool. It connects an existing machine to the Portacode
+AI software builder and operations workspace. Users who start on
+Portacode-hosted infrastructure do not need to install this package.
+
+See the [repository README](../README.md) for the product overview and the
+[pairing guide](https://portacode.com/docs/pair-device/) for installation.
+
+This package is distributed under the [PolyForm Shield License 1.0.0](../LICENSE).
+Third-party dependencies and bundled components remain under their own licenses.
 
 ## Important modules
 
@@ -13,4 +21,4 @@ Most users will interact with the package via the `portacode` command-line tool.
 | `connection.client` | Maintains a resilient WebSocket connection to the Portacode gateway. |
 | `connection.multiplex` | A tiny multiplexer that lets you open unlimited virtual channels over the single WebSocket connection. |
 
-Each sub-package contains its own README for easier discovery. 
+Each sub-package contains its own README for easier discovery.

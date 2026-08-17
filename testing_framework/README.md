@@ -331,4 +331,6 @@ class CustomRunner(TestRunner):
 
 ## 📝 License
 
-This testing framework is part of the Portacode project and follows the same license terms.
+This testing framework is part of the Portacode project and follows the
+[PolyForm Shield License 1.0.0](../LICENSE). Third-party dependencies and
+tools remain under their own licenses.
