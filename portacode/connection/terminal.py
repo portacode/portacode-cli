@@ -111,6 +111,10 @@ from portacode.tunneling.privileged import read_text, run, write_text
 logger = logging.getLogger(__name__)
 EXPOSED_SERVICES_MONITOR_PATH = "/etc/portacode/exposed_services.json"
 EXPOSED_SERVICES_MONITOR_INTERVAL_S = 2.0
+SYSTEM_INFO_INTERVAL_S = 10.0
+# System information includes optional Proxmox and Playwright probes.  Those
+# probes must never hold up the websocket loop; ping_timeout is only 20s.
+SYSTEM_INFO_COLLECTION_TIMEOUT_S = 8.0
 EXPOSED_SERVICES_MISSING_SIGNATURE = "__missing__"
 EXPOSED_SERVICES_INVALID_SIGNATURE = "__invalid__"
 EXPOSED_SERVICES_ENV_PATH = Path("/etc/portacode/exposed_services.env")
@@ -776,16 +780,46 @@ class TerminalManager:
 
     async def _periodic_system_info(self) -> None:
         """Send system_info event every 10 seconds when clients are connected."""
+        collection_task: Optional[asyncio.Task] = None
         while True:
             try:
-                await asyncio.sleep(10)
-                if self._client_session_manager.has_interested_clients():
+                await asyncio.sleep(SYSTEM_INFO_INTERVAL_S)
+                if not self._client_session_manager.has_interested_clients():
+                    continue
+
+                # SystemInfoHandler is synchronous and, on Proxmox hosts, may
+                # wait on the five-minute inventory reconciliation or a slow
+                # local API call.  Run one collection at a time off-loop so a
+                # slow probe cannot starve websocket reads, pings, or pongs.
+                if collection_task is None:
                     from .handlers.system_handlers import SystemInfoHandler
+
                     handler = SystemInfoHandler(self._control_channel, self._context)
-                    system_info = handler.execute({})
-                    await self._send_session_aware(system_info)
+                    collection_task = asyncio.create_task(
+                        asyncio.to_thread(handler.execute, {})
+                    )
+                try:
+                    system_info = await asyncio.wait_for(
+                        asyncio.shield(collection_task),
+                        timeout=SYSTEM_INFO_COLLECTION_TIMEOUT_S,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "System info collection is still running after %.1fs; "
+                        "keeping websocket responsive and skipping this update",
+                        SYSTEM_INFO_COLLECTION_TIMEOUT_S,
+                    )
+                    continue
+
+                collection_task = None
+                await self._send_session_aware(system_info)
+            except asyncio.CancelledError:
+                if collection_task is not None:
+                    collection_task.cancel()
+                raise
             except Exception as exc:
                 logger.exception("Error in periodic system info: %s", exc)
+                collection_task = None
                 continue
 
     async def _periodic_provisioning_template_maintenance(self) -> None:
