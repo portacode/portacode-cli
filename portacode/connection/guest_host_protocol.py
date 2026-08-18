@@ -36,10 +36,17 @@ GUEST_HOST_COMMAND_OPERATIONS = {
     "create_proxmox_container": "provision",
 }
 
-# The protocol reserves additional commands for staged rollout, but this CLI
-# release advertises and executes only the operation validated end-to-end.
+# Every advertised operation is mapped to its existing, independently
+# registered legacy handler.  Server-side capability and runtime gates still
+# control which operations are actually sent through this protocol.
 GUEST_HOST_EXECUTABLE_COMMANDS = frozenset(
-    {"configure_proxmox_container_expose_ports"}
+    {
+        "configure_proxmox_container_expose_ports",
+        "start_proxmox_container",
+        "stop_proxmox_container",
+        "remove_proxmox_container",
+        "create_proxmox_container",
+    }
 )
 
 

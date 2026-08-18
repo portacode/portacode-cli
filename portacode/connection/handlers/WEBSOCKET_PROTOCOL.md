@@ -88,6 +88,18 @@ versions continue using existing commands while flags are disabled. Unknown
 message types or commands must fail closed; they must never fall through to an
 ordinary client-session handler.
 
+Protocol version 1 defines these request types and command mappings:
+
+- `expose_ports` → `configure_proxmox_container_expose_ports`;
+- `power` → `start_proxmox_container` or `stop_proxmox_container`;
+- `delete` → `remove_proxmox_container`;
+- `provision` → `create_proxmox_container`.
+
+Supporting CLI versions advertise the enabled set in
+`system_info.protocol_capabilities.guest_host_requests.request_types`. The
+server must check that per-host list as well as its per-operation runtime flag
+before selecting this transport. Otherwise it uses the unchanged legacy path.
+
 This document describes the complete protocol for communicating with devices through the server, guiding app developers on how to get their client sessions to communicate with devices.
 
 ## Table of Contents

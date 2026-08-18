@@ -30,6 +30,21 @@ class Registry:
         return self.handler if command == self.handler.command_name else None
 
 
+class CommandRecordingHandler(SyncHandler):
+    def __init__(self, control_channel, session, command):
+        super().__init__(control_channel, session)
+        self._command = command
+        self.messages = []
+
+    @property
+    def command_name(self):
+        return self._command
+
+    def execute(self, message):
+        self.messages.append(message)
+        return {"event": "handled", "command": self._command}
+
+
 def request(request_id="ghr-1", target="42"):
     return {
         "type": GUEST_HOST_REQUEST,
@@ -76,11 +91,35 @@ class GuestHostTerminalTests(IsolatedAsyncioTestCase):
         await self.manager._handle_guest_host_request(envelope)
         self.assertEqual(self.manager._control_channel.sent, [])
 
-    async def test_reserved_but_unimplemented_request_type_is_rejected(self):
+    async def test_enabled_request_without_registered_handler_is_rejected(self):
         envelope = request()
         envelope["command"] = "stop_proxmox_container"
         envelope["authorization"]["operation"] = "power.stop"
         await self.manager._handle_guest_host_request(envelope)
         ack, result = self.manager._control_channel.sent
-        self.assertFalse(ack["data"]["accepted"])
-        self.assertEqual(result["data"]["error_code"], "unsupported_request_type")
+        self.assertTrue(ack["data"]["accepted"])
+        self.assertEqual(result["data"]["error_code"], "handler_unavailable")
+
+    async def test_each_advertised_operation_delegates_to_existing_handler(self):
+        cases = (
+            ("start_proxmox_container", "power.start"),
+            ("stop_proxmox_container", "power.stop"),
+            ("remove_proxmox_container", "delete"),
+            ("create_proxmox_container", "provision"),
+        )
+        for command, operation in cases:
+            with self.subTest(command=command):
+                handler = CommandRecordingHandler(self.manager._control_channel, {}, command)
+                self.manager._command_registry = Registry(handler)
+                self.manager._control_channel.sent.clear()
+                envelope = request(request_id=f"ghr-{command}")
+                envelope["command"] = command
+                envelope["authorization"]["operation"] = operation
+
+                await self.manager._handle_guest_host_request(envelope)
+
+                ack, result = self.manager._control_channel.sent
+                self.assertTrue(ack["data"]["accepted"])
+                self.assertTrue(result["data"]["success"])
+                self.assertEqual(len(handler.messages), 1)
+                self.assertEqual(handler.messages[0]["child_device_id"], "42")

@@ -632,7 +632,7 @@ class SystemInfoHandler(SyncHandler):
         info["protocol_capabilities"] = {
             "guest_host_requests": {
                 "protocol_version": 1,
-                "request_types": ["expose_ports"],
+                "request_types": ["expose_ports", "power", "delete", "provision"],
                 "message_types": [
                     "guest_host_request",
                     "guest_host_ack",
