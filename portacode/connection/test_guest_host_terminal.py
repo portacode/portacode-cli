@@ -104,6 +104,7 @@ class GuestHostTerminalTests(IsolatedAsyncioTestCase):
         cases = (
             ("start_proxmox_container", "power.start"),
             ("stop_proxmox_container", "power.stop"),
+            ("restart_proxmox_container", "power.reboot"),
             ("remove_proxmox_container", "delete"),
             ("create_proxmox_container", "provision"),
         )

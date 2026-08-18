@@ -60,6 +60,7 @@ from .proxmox_infra import (
     StartPortacodeServiceHandler,
     StartProxmoxContainerHandler,
     StopProxmoxContainerHandler,
+    RestartProxmoxContainerHandler,
     RemoveProxmoxContainerHandler,
 )
 from .cloudflare_tunnel import CloudflareTunnelSetupHandler
@@ -132,6 +133,7 @@ __all__ = [
     "StartPortacodeServiceHandler",
     "StartProxmoxContainerHandler",
     "StopProxmoxContainerHandler",
+    "RestartProxmoxContainerHandler",
     "RemoveProxmoxContainerHandler",
     "UpdatePortacodeHandler",
     "RevertProxmoxInfraHandler",

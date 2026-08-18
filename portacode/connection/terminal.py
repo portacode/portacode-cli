@@ -74,6 +74,7 @@ from .handlers import (
     StartPortacodeServiceHandler,
     StartProxmoxContainerHandler,
     StopProxmoxContainerHandler,
+    RestartProxmoxContainerHandler,
     RemoveProxmoxContainerHandler,
     CloudflareTunnelSetupHandler,
     CloudflareForwardingHandler,
@@ -595,6 +596,7 @@ class TerminalManager:
         self._command_registry.register(StartPortacodeServiceHandler)
         self._command_registry.register(StartProxmoxContainerHandler)
         self._command_registry.register(StopProxmoxContainerHandler)
+        self._command_registry.register(RestartProxmoxContainerHandler)
         self._command_registry.register(RemoveProxmoxContainerHandler)
         self._command_registry.register(RevertProxmoxInfraHandler)
         self._command_registry.register(CloudflareTunnelSetupHandler)

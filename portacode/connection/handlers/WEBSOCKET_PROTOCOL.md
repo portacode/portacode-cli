@@ -91,7 +91,7 @@ ordinary client-session handler.
 Protocol version 1 defines these request types and command mappings:
 
 - `expose_ports` → `configure_proxmox_container_expose_ports`;
-- `power` → `start_proxmox_container` or `stop_proxmox_container`;
+- `power` → `start_proxmox_container`, `stop_proxmox_container`, or `restart_proxmox_container`;
 - `delete` → `remove_proxmox_container`;
 - `provision` → `create_proxmox_container`.
 
@@ -545,6 +545,14 @@ Stops a running Portacode-managed container. Handled by [`StopProxmoxContainerHa
 
 *   Emits a [`proxmox_container_action`](#proxmox_container_action-event) event with `action="stop"` and the refreshed infra snapshot.
 *   Emits an [`error`](#error) event on failure.
+
+### `restart_proxmox_container`
+
+Stops and starts a Portacode-managed container as one validated host-side
+operation. It accepts the same required `child_device_id` and optional `ctid`
+fields as the start/stop actions. The handler verifies the child-to-container
+mapping before changing state, then emits `proxmox_container_action` with
+`action="restart"`.
 
 ### `remove_proxmox_container`
 

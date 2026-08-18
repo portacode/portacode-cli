@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from portacode.connection.handlers.proxmox_infra import (
     RemoveProxmoxContainerHandler,
+    RestartProxmoxContainerHandler,
     _build_full_container_summary,
     _compose_managed_containers_summary,
     _build_bootstrap_steps,
@@ -36,6 +37,31 @@ from portacode.connection.handlers.proxmox_infra import (
 
 
 class ProxmoxInfraHandlerTests(TestCase):
+    @patch("portacode.connection.handlers.proxmox_infra.get_infra_snapshot", return_value={})
+    @patch("portacode.connection.handlers.proxmox_infra._update_container_record")
+    @patch("portacode.connection.handlers.proxmox_infra._start_container")
+    @patch("portacode.connection.handlers.proxmox_infra._stop_container")
+    @patch("portacode.connection.handlers.proxmox_infra._ensure_container_managed")
+    @patch("portacode.connection.handlers.proxmox_infra._resolve_vmid_for_device", return_value=101)
+    @patch("portacode.connection.handlers.proxmox_infra._get_node_from_config", return_value="pve")
+    @patch("portacode.connection.handlers.proxmox_infra._connect_proxmox")
+    @patch("portacode.connection.handlers.proxmox_infra._ensure_infra_configured", return_value={})
+    def test_restart_validates_child_then_stops_and_starts_once(
+        self, _config, connect, _node, _resolve, ensure_managed, stop, start, update, _snapshot
+    ):
+        stop.return_value = ({"exitstatus": "OK", "status": "stopped"}, 1.0)
+        start.return_value = ({"exitstatus": "OK", "status": "running"}, 2.0)
+        handler = RestartProxmoxContainerHandler(MagicMock(), {})
+
+        result = handler.execute({"child_device_id": "42"})
+
+        ensure_managed.assert_called_once_with(connect.return_value, "pve", 101, device_id="42")
+        stop.assert_called_once_with(connect.return_value, "pve", 101)
+        start.assert_called_once_with(connect.return_value, "pve", 101)
+        update.assert_called_once_with(101, {"status": "running"})
+        self.assertEqual(result["action"], "restart")
+        self.assertTrue(result["success"])
+
     def test_container_config_memory_is_always_mib_even_above_10000(self):
         self.assertEqual(
             _pick_container_ram_mib("lxc", {"memory": 32768}, {"maxmem": 34359738368}),

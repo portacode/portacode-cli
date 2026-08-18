@@ -5165,6 +5165,68 @@ class StopProxmoxContainerHandler(SyncHandler):
         }
 
 
+class RestartProxmoxContainerHandler(SyncHandler):
+    """Restart a managed container as one validated host-side operation."""
+
+    @property
+    def command_name(self) -> str:
+        return "restart_proxmox_container"
+
+    def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        child_device_id = (message.get("child_device_id") or "").strip()
+        if not child_device_id:
+            raise ValueError("child_device_id is required for restart_proxmox_container")
+        config = _ensure_infra_configured()
+        proxmox = _connect_proxmox(config)
+        node = _get_node_from_config(config)
+        try:
+            vmid = _parse_ctid(message)
+        except ValueError:
+            try:
+                vmid = _resolve_vmid_for_device(child_device_id)
+            except _DeviceLookupError:
+                vmid = _resolve_vmid_for_device_in_proxmox(proxmox, node, child_device_id)
+        _ensure_container_managed(proxmox, node, vmid, device_id=child_device_id)
+
+        stop_status, stop_elapsed = _stop_container(proxmox, node, vmid)
+        start_status, start_elapsed = _start_container(proxmox, node, vmid)
+        _update_container_record(vmid, {"status": "running"})
+
+        forwarding_ip_updated = False
+        try:
+            from .cloudflare_forwarding import reconcile_container_forwarding_ip
+
+            forwarding_ip_updated = reconcile_container_forwarding_ip(
+                child_device_id,
+                proxmox=proxmox,
+                node=node,
+                lease_attempts=6,
+                lease_retry_seconds=1.0,
+            )
+        except Exception:
+            logger.warning(
+                "Unable to reconcile exposed IP after restarting container device_id=%s vmid=%s",
+                child_device_id,
+                vmid,
+                exc_info=True,
+            )
+
+        return {
+            "event": "proxmox_container_action",
+            "action": "restart",
+            "success": True,
+            "ctid": str(vmid),
+            "message": f"Restarted container {vmid} in {stop_elapsed + start_elapsed:.1f}s.",
+            "details": {
+                "stop_exitstatus": stop_status.get("exitstatus"),
+                "start_exitstatus": start_status.get("exitstatus"),
+                "forwarding_ip_updated": forwarding_ip_updated,
+            },
+            "status": start_status.get("status") or "running",
+            "infra": get_infra_snapshot(),
+        }
+
+
 class RemoveProxmoxContainerHandler(SyncHandler):
     """Delete a managed container via the Proxmox API."""
 

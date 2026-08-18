@@ -24,6 +24,7 @@ GUEST_HOST_REQUEST_COMMANDS = frozenset(
         "configure_proxmox_container_expose_ports",
         "start_proxmox_container",
         "stop_proxmox_container",
+        "restart_proxmox_container",
         "remove_proxmox_container",
         "create_proxmox_container",
     }
@@ -32,6 +33,7 @@ GUEST_HOST_COMMAND_OPERATIONS = {
     "configure_proxmox_container_expose_ports": "expose_ports",
     "start_proxmox_container": "power",
     "stop_proxmox_container": "power",
+    "restart_proxmox_container": "power",
     "remove_proxmox_container": "delete",
     "create_proxmox_container": "provision",
 }
@@ -44,6 +46,7 @@ GUEST_HOST_EXECUTABLE_COMMANDS = frozenset(
         "configure_proxmox_container_expose_ports",
         "start_proxmox_container",
         "stop_proxmox_container",
+        "restart_proxmox_container",
         "remove_proxmox_container",
         "create_proxmox_container",
     }
