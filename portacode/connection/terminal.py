@@ -26,6 +26,16 @@ from typing import Any, Dict, Optional, List
 from websockets.exceptions import ConnectionClosedError
 
 from .multiplex import Multiplexer, Channel
+from .guest_host_protocol import (
+    GUEST_HOST_ACK,
+    GUEST_HOST_EXECUTABLE_COMMANDS,
+    GUEST_HOST_REQUEST,
+    GUEST_HOST_RESULT,
+    GuestHostProtocolError,
+    build_guest_host_response,
+    validate_guest_host_request,
+)
+from .handlers.base import AsyncHandler, SyncHandler
 from .handlers import (
     CommandRegistry,
     TerminalStartHandler,
@@ -479,6 +489,7 @@ class TerminalManager:
             "debug": self.debug,
             "event_loop": asyncio.get_running_loop(),
         }
+        self._guest_host_request_results: Dict[str, Dict[str, Any]] = {}
         
         # Initialize command registry
         self._command_registry = CommandRegistry(self._control_channel, self._context)
@@ -624,6 +635,9 @@ class TerminalManager:
                 if not isinstance(message, dict):
                     logger.warning("terminal_manager: Invalid control frame type: %r", type(message))
                     continue
+                if message.get("type") == GUEST_HOST_REQUEST:
+                    await self._handle_guest_host_request(message)
+                    continue
                 cmd = message.get("cmd")
                 if not cmd:
                     # Ignore frames that are *events* coming from the remote side
@@ -664,6 +678,99 @@ class TerminalManager:
                 logger.exception("terminal_manager: Error in control loop: %s", exc)
                 # Continue processing other messages
                 continue
+
+    async def _handle_guest_host_request(self, raw_message: Dict[str, Any]) -> None:
+        """Execute an allowlisted request without creating a client session."""
+
+        try:
+            envelope = validate_guest_host_request(raw_message)
+        except GuestHostProtocolError as exc:
+            logger.warning("Rejected invalid Guest Host Request: %s", exc)
+            # A malformed envelope may not contain safe correlation/routing
+            # fields, so fail closed without reflecting attacker-controlled IDs.
+            return
+
+        request_id = envelope["request_id"]
+        command = envelope["command"]
+        target_device_id = envelope["target_device_id"]
+        previous_result = self._guest_host_request_results.get(request_id)
+        if previous_result is not None:
+            logger.info("Replaying cached Guest Host Request result request_id=%s", request_id)
+            await self._control_channel.send(dict(previous_result))
+            return
+
+        ack = build_guest_host_response(
+            GUEST_HOST_ACK,
+            request_id=request_id,
+            command=command,
+            target_device_id=target_device_id,
+            data={"accepted": command in GUEST_HOST_EXECUTABLE_COMMANDS},
+        )
+        await self._control_channel.send(ack)
+
+        if command not in GUEST_HOST_EXECUTABLE_COMMANDS:
+            result = build_guest_host_response(
+                GUEST_HOST_RESULT,
+                request_id=request_id,
+                command=command,
+                target_device_id=target_device_id,
+                data={
+                    "success": False,
+                    "error": "Guest Host Request command is not enabled by this CLI version",
+                    "error_code": "unsupported_request_type",
+                },
+            )
+            self._remember_guest_host_result(request_id, result)
+            await self._control_channel.send(result)
+            return
+
+        handler = self._command_registry.get_handler(command)
+        if handler is None:
+            result = build_guest_host_response(
+                GUEST_HOST_RESULT,
+                request_id=request_id,
+                command=command,
+                target_device_id=target_device_id,
+                data={"success": False, "error": "Request handler is unavailable", "error_code": "handler_unavailable"},
+            )
+            self._remember_guest_host_result(request_id, result)
+            await self._control_channel.send(result)
+            return
+
+        handler_message = dict(envelope["payload"])
+        handler_message["request_id"] = request_id
+        try:
+            if isinstance(handler, SyncHandler):
+                loop = asyncio.get_running_loop()
+                handler_result = await loop.run_in_executor(None, handler.execute, handler_message)
+            elif isinstance(handler, AsyncHandler):
+                handler_result = await handler.execute(handler_message)
+            else:
+                raise RuntimeError("Request handler has an unsupported implementation type")
+            result_data = {"success": True, "response": handler_result}
+        except Exception as exc:
+            logger.exception(
+                "Guest Host Request failed request_id=%s command=%s target=%s",
+                request_id,
+                command,
+                target_device_id,
+            )
+            result_data = {"success": False, "error": str(exc), "error_code": "operation_failed"}
+
+        result = build_guest_host_response(
+            GUEST_HOST_RESULT,
+            request_id=request_id,
+            command=command,
+            target_device_id=target_device_id,
+            data=result_data,
+        )
+        self._remember_guest_host_result(request_id, result)
+        await self._control_channel.send(result)
+
+    def _remember_guest_host_result(self, request_id: str, result: Dict[str, Any]) -> None:
+        self._guest_host_request_results[request_id] = dict(result)
+        while len(self._guest_host_request_results) > 512:
+            self._guest_host_request_results.pop(next(iter(self._guest_host_request_results)))
 
     async def _periodic_system_info(self) -> None:
         """Send system_info event every 10 seconds when clients are connected."""

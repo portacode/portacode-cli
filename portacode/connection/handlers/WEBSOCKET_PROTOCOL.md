@@ -31,6 +31,63 @@ The Portacode server acts as a **routing middleman** between client sessions and
 
 Portacode infrastructure devices (like the proxmox host) can send events on behalf of the LXC Devices they manage. Such messages include the optional `on_behalf_of_device` field and the server silently replaces `device_id` with that child device before routing. The gateway enforces that the sender is the child’s `proxmox_parent` (via `Device.proxmox_parent`) so only the infrastructure owner can impersonate a child device. Messages that fail this check are dropped.
 
+### Guest Host Requests
+
+A **Guest Host Request** is a server-originated, guest-authorized request sent
+directly to a managed guest's Proxmox parent over the parent's existing
+authenticated device WebSocket. It is not a client-session message and must not
+contain `source_client_session` or impersonate the host owner.
+
+The four message types are:
+
+- `guest_host_request`: server to host, requesting an allowlisted operation;
+- `guest_host_ack`: host to server, confirming acceptance for processing;
+- `guest_host_progress`: host to server, reporting correlated progress;
+- `guest_host_result`: host to server, reporting terminal success or failure.
+
+All messages use control channel `0`. A request payload has this shape:
+
+```json
+{
+  "channel": 0,
+  "payload": {
+    "type": "guest_host_request",
+    "command": "stop_proxmox_container",
+    "request_id": "ghr_example",
+    "target_device_id": "42",
+    "authorization": {
+      "principal_type": "user",
+      "principal_id": "7",
+      "principal_role": "owner",
+      "operation": "power.stop"
+    },
+    "payload": {
+      "child_device_id": "42"
+    }
+  }
+}
+```
+
+`principal_role` and other provenance fields are informational evidence of the
+server's authorization decision; they never replace authorization. The HTTP
+caller cannot choose them, and the CLI does not grant privileges from them.
+The server authorizes the principal against the guest and request type, selects
+the recorded parent, and creates the envelope. The CLI independently requires
+an allowlisted command and verifies that the target guest maps to the managed
+container before executing it.
+
+A response carries the same `request_id`, `command`, and `target_device_id`.
+Guest-facing acknowledgements, progress, and results set
+`on_behalf_of_device` to the guest ID. Before routing them, the server must
+verify that the authenticated sending host is still the guest's recorded
+`proxmox_parent`. This is the same fail-closed security boundary used for
+existing proxied infrastructure updates.
+
+Guest Host Requests are additive and feature-flagged per operation. Older CLI
+versions continue using existing commands while flags are disabled. Unknown
+message types or commands must fail closed; they must never fall through to an
+ordinary client-session handler.
+
 This document describes the complete protocol for communicating with devices through the server, guiding app developers on how to get their client sessions to communicate with devices.
 
 ## Table of Contents

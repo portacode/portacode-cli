@@ -629,6 +629,18 @@ class SystemInfoHandler(SyncHandler):
         # logger.info("System info collected successfully with OS info: %s", info.get("os_info", {}).get("os_type", "Unknown"))
         
         info["portacode_version"] = __version__
+        info["protocol_capabilities"] = {
+            "guest_host_requests": {
+                "protocol_version": 1,
+                "request_types": ["expose_ports"],
+                "message_types": [
+                    "guest_host_request",
+                    "guest_host_ack",
+                    "guest_host_progress",
+                    "guest_host_result",
+                ],
+            }
+        }
 
         return {
             "event": "system_info",
