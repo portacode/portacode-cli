@@ -1327,7 +1327,7 @@ def _refresh_container_statuses(records: List[Dict[str, Any]], config: Optional[
 
 
 def _initialize_managed_containers_state(force: bool = False) -> Dict[str, Any]:
-    with _MANAGED_CONTAINERS_STATE_LOCK:
+    with _acquire_state_lock("managed state initialization check"):
         if _MANAGED_CONTAINERS_STATE["initialized"] and not force:
             base = _MANAGED_CONTAINERS_STATE["base_summary"]
             return _copy_summary(base) if base else {}
@@ -1352,7 +1352,7 @@ def _initialize_managed_containers_state(force: bool = False) -> Dict[str, Any]:
         "cpu_share": float(base_summary.get("total_cpu_share") or 0.0),
     }
 
-    with _MANAGED_CONTAINERS_STATE_LOCK:
+    with _acquire_state_lock("managed state initialization commit"):
         _MANAGED_CONTAINERS_STATE["initialized"] = True
         _MANAGED_CONTAINERS_STATE["base_summary"] = base_summary
         _MANAGED_CONTAINERS_STATE["initial_totals"] = initial_totals
@@ -1374,7 +1374,7 @@ def reconcile_managed_containers_inventory() -> Dict[str, Any]:
     never replaced by reconciliation.
     """
     _initialize_managed_containers_state()
-    with _MANAGED_CONTAINERS_STATE_LOCK:
+    with _acquire_state_lock("inventory reconciliation snapshot"):
         revision = int(_MANAGED_CONTAINERS_STATE.get("revision") or 0)
         records = [record.copy() for record in _MANAGED_CONTAINERS_STATE.get("records", {}).values()]
 
@@ -1401,38 +1401,46 @@ def reconcile_managed_containers_inventory() -> Dict[str, Any]:
 
     cleaned_vmids: List[int] = []
     cleanup_errors: List[Dict[str, str]] = []
-    with _MANAGED_CONTAINERS_STATE_LOCK:
+    with _acquire_state_lock("inventory reconciliation pre-cleanup check"):
         if int(_MANAGED_CONTAINERS_STATE.get("revision") or 0) != revision:
             return {"refreshed": False, "reason": "state_changed"}
-        # Serialize cleanup with create/delete state mutations. This prevents a
-        # stale inventory scan from clearing metadata after a CTID is reused.
-        for record in missing_records:
-            try:
-                vmid = int(record["vmid"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            device_id = str(record.get("device_id") or "").strip()
-            try:
-                if device_id:
-                    from .cloudflare_forwarding import set_container_forwarding_rules
 
-                    try:
-                        set_container_forwarding_rules(device_id, [])
-                    except RuntimeError as exc:
-                        message = str(exc).lower()
-                        if (
-                            "cloudflare tunnel is not configured yet" not in message
-                            and "domain or tunnel name missing" not in message
-                        ):
-                            raise
-                cleaned_vmids.append(vmid)
-            except Exception as exc:  # retry on the next reconciliation pass
-                logger.warning(
-                    "Unable to clean Proxmox-side metadata for missing container %s: %s",
-                    vmid,
-                    exc,
-                )
-                cleanup_errors.append({"vmid": str(vmid), "error": str(exc)})
+    # Forwarding cleanup may call cloudflared and touch its configuration. It
+    # must never run while holding the managed-state lock: reservations,
+    # deletion, and system snapshots all need that lock to remain responsive.
+    for record in missing_records:
+        try:
+            vmid = int(record["vmid"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        device_id = str(record.get("device_id") or "").strip()
+        try:
+            if device_id:
+                from .cloudflare_forwarding import set_container_forwarding_rules
+
+                try:
+                    set_container_forwarding_rules(device_id, [])
+                except RuntimeError as exc:
+                    message = str(exc).lower()
+                    if (
+                        "cloudflare tunnel is not configured yet" not in message
+                        and "domain or tunnel name missing" not in message
+                    ):
+                        raise
+            cleaned_vmids.append(vmid)
+        except Exception as exc:  # retry on the next reconciliation pass
+            logger.warning(
+                "Unable to clean Proxmox-side metadata for missing container %s: %s",
+                vmid,
+                exc,
+            )
+            cleanup_errors.append({"vmid": str(vmid), "error": str(exc)})
+
+    with _acquire_state_lock("inventory reconciliation commit"):
+        if int(_MANAGED_CONTAINERS_STATE.get("revision") or 0) != revision:
+            return {"refreshed": False, "reason": "state_changed"}
+        # The revision check prevents stale scan results from removing metadata
+        # after provisioning or deletion changed the managed state.
         for vmid in cleaned_vmids:
             path = CONTAINERS_DIR / f"ct-{vmid}.json"
             path.unlink(missing_ok=True)
@@ -1856,7 +1864,7 @@ def _compose_managed_containers_summary(
 
 def _get_managed_containers_summary(force: bool = False) -> Dict[str, Any]:
     _initialize_managed_containers_state(force=force)
-    with _MANAGED_CONTAINERS_STATE_LOCK:
+    with _acquire_state_lock("managed container summary snapshot"):
         base_summary = _MANAGED_CONTAINERS_STATE.get("base_summary") or {}
         records = list(_MANAGED_CONTAINERS_STATE.get("records", {}).values())
         pending = list(_MANAGED_CONTAINERS_STATE.get("pending", {}).values())
@@ -1872,7 +1880,7 @@ def _reserve_container_resources(payload: Dict[str, Any], *, device_id: str, req
     disk_gib = int(payload.get("disk_gib") or 0)
     cpu_share = float(payload.get("cpus") or 0.0)
     reservation_id = secrets.token_hex(8)
-    with _MANAGED_CONTAINERS_STATE_LOCK:
+    with _acquire_state_lock("container resource reservation"):
         base_summary = _MANAGED_CONTAINERS_STATE.get("base_summary") or {}
         records = list(_MANAGED_CONTAINERS_STATE.get("records", {}).values())
         pending = list(_MANAGED_CONTAINERS_STATE.get("pending", {}).values())
@@ -1904,7 +1912,7 @@ def _reserve_container_resources(payload: Dict[str, Any], *, device_id: str, req
 def _release_container_reservation(reservation_id: Optional[str]) -> None:
     if not reservation_id:
         return
-    with _MANAGED_CONTAINERS_STATE_LOCK:
+    with _acquire_state_lock("container reservation release"):
         _MANAGED_CONTAINERS_STATE.get("pending", {}).pop(reservation_id, None)
 
 
@@ -2990,7 +2998,7 @@ def _require_successful_proxmox_task(
 
 def _register_container_record(vmid: int, payload: Dict[str, Any], reservation_id: Optional[str] = None) -> None:
     _initialize_managed_containers_state()
-    with _MANAGED_CONTAINERS_STATE_LOCK:
+    with _acquire_state_lock("container record update"):
         if reservation_id:
             _MANAGED_CONTAINERS_STATE["pending"].pop(reservation_id, None)
         _MANAGED_CONTAINERS_STATE["records"][str(vmid)] = payload.copy()
@@ -3001,7 +3009,7 @@ def _register_container_record(vmid: int, payload: Dict[str, Any], reservation_i
 
 def _unregister_container_record(vmid: int) -> None:
     _initialize_managed_containers_state()
-    with _MANAGED_CONTAINERS_STATE_LOCK:
+    with _acquire_state_lock("container record removal"):
         _MANAGED_CONTAINERS_STATE["records"].pop(str(vmid), None)
         _MANAGED_CONTAINERS_STATE["revision"] = int(
             _MANAGED_CONTAINERS_STATE.get("revision") or 0

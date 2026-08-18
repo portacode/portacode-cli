@@ -1,5 +1,6 @@
 """Command registry for managing handler dispatch."""
 
+import asyncio
 import logging
 from typing import Dict, Type, Any, Optional, List, TYPE_CHECKING
 from portacode.utils.ntp_clock import ntp_clock
@@ -24,6 +25,7 @@ class CommandRegistry:
         self.control_channel = control_channel
         self.context = context
         self._handlers: Dict[str, "BaseHandler"] = {}
+        self._inflight_dispatches: Dict[str, asyncio.Task[bool]] = {}
         
     def register(self, handler_class: Type["BaseHandler"]) -> None:
         """Register a command handler.
@@ -99,6 +101,35 @@ class CommandRegistry:
             logger.warning("registry: No handler found for command: %s", command_name)
             return False
 
+        # System information is requested by periodic refreshes, dashboard
+        # joins, and explicit probes. All of those sources must share one
+        # collection; Proxmox discovery is too expensive to run concurrently.
+        if command_name == "system_info":
+            existing = self._inflight_dispatches.get(command_name)
+            if existing is not None and not existing.done():
+                logger.info("registry: Coalesced concurrent system_info request")
+                return True
+            task = asyncio.create_task(
+                self._dispatch_handler(command_name, handler, message, reply_channel)
+            )
+            self._inflight_dispatches[command_name] = task
+
+            def _clear_inflight(completed: asyncio.Task[bool]) -> None:
+                if self._inflight_dispatches.get(command_name) is completed:
+                    self._inflight_dispatches.pop(command_name, None)
+
+            task.add_done_callback(_clear_inflight)
+            return True
+
+        return await self._dispatch_handler(command_name, handler, message, reply_channel)
+
+    async def _dispatch_handler(
+        self,
+        command_name: str,
+        handler: "BaseHandler",
+        message: Dict[str, Any],
+        reply_channel: Optional[str],
+    ) -> bool:
         try:
             await handler.handle(message, reply_channel)
             logger.info("registry: Successfully dispatched command '%s'", command_name)

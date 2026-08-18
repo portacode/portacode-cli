@@ -1,4 +1,5 @@
 from unittest import TestCase
+import threading
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
@@ -236,6 +237,50 @@ class ProxmoxInfraHandlerTests(TestCase):
         self.assertIn("144", state["records"])
         self.assertEqual(result["cleaned_vmids"], [])
         self.assertEqual(result["cleanup_errors"][0]["vmid"], "144")
+
+    @patch("portacode.connection.handlers.proxmox_infra._load_config", return_value={"node": "pve"})
+    def test_reconciliation_does_not_hold_state_lock_during_forwarding_cleanup(self, _config):
+        from portacode.connection.handlers import proxmox_infra
+
+        entered_cleanup = threading.Event()
+        release_cleanup = threading.Event()
+        state = {
+            "initialized": True, "base_summary": {}, "initial_totals": {},
+            "records": {"144": {"vmid": 144, "device_id": "42"}},
+            "pending": {}, "revision": 2,
+        }
+        refreshed = {
+            "inventory_updated_at": "now",
+            "missing_containers": [{"vmid": "144", "device_id": "42"}],
+            "total_ram_mib": 0, "total_disk_gib": 0, "total_cpu_share": 0,
+        }
+
+        def blocking_cleanup(_device_id, _rules):
+            entered_cleanup.set()
+            release_cleanup.wait(timeout=1)
+
+        with TemporaryDirectory() as root, patch(
+            "portacode.connection.handlers.proxmox_infra.CONTAINERS_DIR", Path(root)
+        ), patch(
+            "portacode.connection.handlers.proxmox_infra._MANAGED_CONTAINERS_STATE", state
+        ), patch(
+            "portacode.connection.handlers.proxmox_infra._build_full_container_summary",
+            return_value=refreshed,
+        ), patch(
+            "portacode.connection.handlers.cloudflare_forwarding.set_container_forwarding_rules",
+            side_effect=blocking_cleanup,
+        ):
+            worker = threading.Thread(target=reconcile_managed_containers_inventory)
+            worker.start()
+            self.assertTrue(entered_cleanup.wait(timeout=0.2))
+            acquired = proxmox_infra._MANAGED_CONTAINERS_STATE_LOCK.acquire(timeout=0.2)
+            if acquired:
+                proxmox_infra._MANAGED_CONTAINERS_STATE_LOCK.release()
+            release_cleanup.set()
+            worker.join(timeout=1)
+
+        self.assertTrue(acquired)
+        self.assertFalse(worker.is_alive())
 
     @patch("portacode.connection.handlers.proxmox_infra._load_config", return_value={"node": "pve"})
     def test_reconciliation_discards_scan_when_managed_state_changes(self, _config):
