@@ -2177,6 +2177,7 @@ def _clone_native_template(
         swap=int(payload.get("swap_mb", 0)),
         cores=max(int(payload.get("cores", 1)), 1),
         cpulimit=float(payload.get("cpulimit", payload.get("cpus", 1))),
+        cpuunits=max(1, int(payload.get("cpuunits", round(float(payload.get("cpus", 1)) * 100)))),
         net0=payload["net0"],
         description=description,
         onboot=0,
@@ -4359,6 +4360,7 @@ class CreateProxmoxContainerHandler(SyncHandler):
                 payload["cache_template_disk_gib"] = int(native_template["disk_gib"])
                 cache_steps = []
             payload["cpulimit"] = float(payload["cpus"])
+            payload["cpuunits"] = max(1, int(round(float(payload["cpus"]) * 100)))
             payload["cores"] = int(max(math.ceil(payload["cpus"]), 1))
             payload["memory"] = int(payload["ram_mib"])
             payload["node"] = node

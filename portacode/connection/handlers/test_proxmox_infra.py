@@ -659,6 +659,7 @@ class ProxmoxInfraHandlerTests(TestCase):
             "cores": 1,
             "cpus": 0.5,
             "cpulimit": 0.5,
+            "cpuunits": 50,
             "net0": "name=eth0,bridge=vmbr1,ip=dhcp",
             "description": "portacode-managed:true",
             "device_id": "1069",
@@ -672,6 +673,7 @@ class ProxmoxInfraHandlerTests(TestCase):
         self.assertNotIn("storage", clone_kwargs)
         config_kwargs = proxmox.nodes.return_value.lxc.return_value.config.put.call_args.kwargs
         self.assertIn("cache_parent=900", config_kwargs["description"])
+        self.assertEqual(config_kwargs["cpuunits"], 50)
 
     @patch("portacode.connection.handlers.proxmox_infra._load_managed_container_records")
     def test_template_dependents_ignore_records_from_other_nodes(self, mock_records):
