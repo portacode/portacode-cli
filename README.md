@@ -8,7 +8,7 @@ Portacode is an AI software builder and operator. Describe the outcome you want 
 
 Unlike builders that stop at a preview or exported repository, Portacode gives you the complete working system: source, data, services, containers, configuration, and runtime. Start on Portacode-hosted infrastructure, or connect your own machine when you want to. The result remains portable either way.
 
-[Start building](https://portacode.com/) · [Deployment templates](https://portacode.com/one-click-deployment-templates/) · [Android app](https://play.google.com/store/apps/details?id=com.portacode.app) · [Report an issue](https://github.com/portacode/portacode/issues)
+[Start building](https://portacode.com/) · [Deployment templates](https://portacode.com/one-click-deployment-templates/) · [Android app](https://play.google.com/store/apps/details?id=com.portacode.app) · [Report an issue](https://github.com/portacode/portacode-cli/issues)
 
 > [!NOTE]
 > This repository contains Portacode's open-source device agent and CLI. Installing it is optional: new users can start with a Portacode-hosted workspace without preparing a machine.
@@ -113,8 +113,8 @@ The CLI uses the operating system's application-data directory (through [`platfo
 
 When running the CLI in a container, persist the relevant application-data directory so the container retains its device identity across rebuilds. The examples demonstrate the pattern:
 
-- [`examples/simple_device`](https://github.com/portacode/portacode/tree/master/examples/simple_device) — one container with a persistent workspace and identity
-- [`examples/workshop_fleet`](https://github.com/portacode/portacode/tree/master/examples/workshop_fleet) — a multi-seat lab with separate persistent workspaces
+- [`examples/simple_device`](https://github.com/portacode/portacode-cli/tree/master/examples/simple_device) — one container with a persistent workspace and identity
+- [`examples/workshop_fleet`](https://github.com/portacode/portacode-cli/tree/master/examples/workshop_fleet) — a multi-seat lab with separate persistent workspaces
 
 ## Guides
 
@@ -127,7 +127,7 @@ When running the CLI in a container, persist the relevant application-data direc
 
 ## Contributing and Support
 
-Bug reports, focused fixes, and documentation improvements are welcome. Open an [issue](https://github.com/portacode/portacode/issues) or a pull request in this repository.
+Bug reports, focused fixes, and documentation improvements are welcome. Open an [issue](https://github.com/portacode/portacode-cli/issues) or a pull request in this repository.
 
 For product support, email [support@portacode.com](mailto:support@portacode.com).
 

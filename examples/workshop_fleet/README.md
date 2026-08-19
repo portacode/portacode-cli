@@ -32,7 +32,7 @@ docker compose version
 
 1. Open a terminal and clone the repository:
    ```bash
-   git clone https://github.com/portacode/portacode.git
+   git clone https://github.com/portacode/portacode-cli.git
    ```
 2. Move into the Workshop Fleet folder:
    ```bash

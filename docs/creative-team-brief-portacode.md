@@ -102,7 +102,7 @@ Primary product links:
 
 Supporting links:
 - CLI package/docs entry: `https://pypi.org/project/portacode/`
-- GitHub repo: `https://github.com/portacode/portacode`
+- GitHub repo: `https://github.com/portacode/portacode-cli`
 
 ## 10. Content framework to produce (recommended)
 

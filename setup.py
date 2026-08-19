@@ -24,8 +24,8 @@ setup(
         "CI/CD Documentation": "https://portacode.com/portacode-cicd-intro/",
         "Deployment Templates": "https://portacode.com/one-click-deployment-templates/",
         "Pair a Machine": "https://portacode.com/docs/pair-device/",
-        "Source": "https://github.com/portacode/portacode",
-        "Issues": "https://github.com/portacode/portacode/issues",
+        "Source": "https://github.com/portacode/portacode-cli",
+        "Issues": "https://github.com/portacode/portacode-cli/issues",
     },
     keywords=[
         "ai software agent",
