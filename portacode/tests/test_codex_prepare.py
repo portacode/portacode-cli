@@ -79,11 +79,44 @@ def test_nvm_node_bin_is_added_to_current_path(tmp_path, monkeypatch):
         "portacode.codex_prepare.subprocess.run",
         lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=f"{node}\n", stderr=""),
     )
-    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("PATH", "/bin:/usr/bin")
 
     _install_node_with_nvm()
 
     assert str(node.parent) == __import__("os").environ["PATH"].split(":")[0]
+
+
+def test_nvm_resolves_lts_alias_after_install(tmp_path, monkeypatch):
+    from portacode.codex_prepare import _install_node_with_nvm
+
+    home = tmp_path / "root"
+    nvm_dir = home / ".nvm"
+    node = nvm_dir / "versions/node/v24.19.0/bin/node"
+    node.parent.mkdir(parents=True)
+    node.write_text("", encoding="utf-8")
+    (nvm_dir / "nvm.sh").write_text(
+        """
+nvm() {
+    if [ "$1" = install ] && [ "$2" = --lts ]; then return 0; fi
+    if [ "$1" = alias ] && [ "$2" = default ] && [ "$3" = 'lts/*' ]; then return 0; fi
+    if [ "$1" = which ] && [ "$2" = 'lts/*' ]; then printf '%s\\n' "$FAKE_NODE"; return 0; fi
+    printf 'unexpected nvm arguments: %s\\n' "$*" >&2
+    return 9
+}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("portacode.codex_prepare.Path.home", lambda: home)
+    monkeypatch.setattr(
+        "portacode.codex_prepare.shutil.which",
+        lambda name: f"/usr/bin/{name}" if name in {"bash", "curl"} else None,
+    )
+    monkeypatch.setenv("FAKE_NODE", str(node))
+    monkeypatch.setenv("PATH", "/bin:/usr/bin")
+
+    _install_node_with_nvm()
+
+    assert __import__("os").environ["PATH"].split(":")[0] == str(node.parent)
 
 
 def test_install_codex_does_not_sudo_user_owned_nvm(tmp_path, monkeypatch):

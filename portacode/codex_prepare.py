@@ -105,7 +105,7 @@ def _install_node_with_nvm() -> None:
         f". {shlex.quote(str(nvm_sh))}; "
         "nvm install --lts; "
         "nvm alias default 'lts/*'; "
-        "nvm which --lts"
+        "nvm which 'lts/*'"
     )
     result = subprocess.run(["bash", "-c", command], text=True, capture_output=True)
     if result.returncode:
