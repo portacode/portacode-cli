@@ -248,6 +248,18 @@ def test_build_codex_subprocess_env_reads_managed_file(tmp_path):
     assert env["PATH"] == "/usr/bin"
 
 
+def test_build_codex_subprocess_env_prepends_managed_node_bin(tmp_path):
+    from portacode.codex_prepare import build_codex_subprocess_env
+
+    env_file = tmp_path / "codex.env"
+    env_file.write_text(
+        "PORTACODE_CODEX_NODE_BIN=/root/.nvm/versions/node/v22/bin\n",
+        encoding="utf-8",
+    )
+    env = build_codex_subprocess_env(base={"PATH": "/usr/bin"}, path=env_file)
+    assert env["PATH"] == "/root/.nvm/versions/node/v22/bin:/usr/bin"
+
+
 def test_build_codex_subprocess_env_defaults_sentinel_without_file(tmp_path):
     from portacode.codex_prepare import LOCAL_SENTINEL, build_codex_subprocess_env
 

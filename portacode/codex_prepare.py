@@ -43,6 +43,8 @@ supports_websockets = false
 LOCAL_SENTINEL = "portacode-local"
 CODEX_ENV_PATH = Path("/etc/portacode/codex.env")
 OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
+CODEX_NODE_BIN_ENV = "PORTACODE_CODEX_NODE_BIN"
+NVM_VERSION = "v0.40.3"
 
 
 class CodexPreparationError(RuntimeError):
@@ -72,8 +74,71 @@ def _node_major() -> int:
     return int(match.group(1)) if result.returncode == 0 and match else 0
 
 
+def _prepend_path(path: Path) -> None:
+    value = str(path)
+    entries = (os.environ.get("PATH") or os.defpath).split(os.pathsep)
+    os.environ["PATH"] = os.pathsep.join([value, *[entry for entry in entries if entry != value]])
+
+
+def _install_node_with_nvm() -> None:
+    """Install Node LTS for the invoking user without modifying shell profiles."""
+    if not shutil.which("bash") or not shutil.which("curl"):
+        raise CodexPreparationError("Installing Node.js with NVM requires bash and curl.")
+
+    nvm_dir = Path.home() / ".nvm"
+    nvm_sh = nvm_dir / "nvm.sh"
+    if not nvm_sh.is_file():
+        installer_url = f"https://raw.githubusercontent.com/nvm-sh/nvm/{NVM_VERSION}/install.sh"
+        command = (
+            "installer=$(mktemp) || exit; "
+            "trap 'rm -f \"$installer\"' EXIT; "
+            f"curl -fsSL {shlex.quote(installer_url)} -o \"$installer\" && "
+            f"env NVM_DIR={shlex.quote(str(nvm_dir))} PROFILE=/dev/null bash \"$installer\""
+        )
+        _run(["bash", "-c", command])
+    if not nvm_sh.is_file():
+        raise CodexPreparationError(f"NVM installation completed but {nvm_sh} was not created.")
+
+    command = (
+        "set -e; "
+        f"export NVM_DIR={shlex.quote(str(nvm_dir))}; "
+        f". {shlex.quote(str(nvm_sh))}; "
+        "nvm install --lts; "
+        "nvm alias default 'lts/*'; "
+        "nvm which --lts"
+    )
+    result = subprocess.run(["bash", "-c", command], text=True, capture_output=True)
+    if result.returncode:
+        output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+        detail = f"\n{output[-4000:]}" if output else ""
+        raise CodexPreparationError(f"NVM failed to install Node.js LTS.{detail}")
+    candidates = [Path(line.strip()) for line in result.stdout.splitlines() if line.strip().startswith("/")]
+    node = candidates[-1] if candidates else None
+    if not node or not node.is_file():
+        raise CodexPreparationError("NVM installed Node.js but did not return its executable path.")
+    _prepend_path(node.parent)
+
+
+def _refresh_windows_node_path() -> None:
+    """Make a fresh winget Node installation visible to this process."""
+    candidates = []
+    for env_name in ("ProgramFiles", "LOCALAPPDATA"):
+        root = (os.environ.get(env_name) or "").strip()
+        if root:
+            candidates.append(Path(root) / ("nodejs" if env_name == "ProgramFiles" else "Programs/nodejs"))
+    for directory in candidates:
+        if (directory / "node.exe").is_file():
+            _prepend_path(directory)
+            return
+
+
 def _codex_path() -> str | None:
     return shutil.which("codex") or shutil.which("codex.cmd")
+
+
+def _codex_works(path: str) -> bool:
+    result = subprocess.run([path, "--version"], text=True, capture_output=True)
+    return result.returncode == 0
 
 
 def _sudo_prefix() -> list[str]:
@@ -113,25 +178,16 @@ def _install_node_if_needed() -> None:
         if "alpine" in release:
             packages = ["npm"] if node_ready else ["nodejs", "npm"]
             _run([*_sudo_prefix(), "apk", "add", "--no-cache", *packages])
-        elif any(name in release for name in ("debian", "ubuntu")):
-            # Exit 100: Proxmox enterprise.proxmox.com 401 without subscription.
-            # Same tolerance as ensure_cloudflared / ensure_pyyaml / proxmox_infra.
-            _run([*_sudo_prefix(), "apt-get", "update"], ok_returncodes=(0, 100))
-            if node_ready:
-                _run([*_sudo_prefix(), "apt-get", "install", "-y", "npm"])
-                if not (shutil.which("npm") or shutil.which("npm.cmd")):
-                    raise CodexPreparationError("npm installation completed but npm is not on PATH.")
-                return
-            _run([*_sudo_prefix(), "apt-get", "install", "-y", "ca-certificates", "curl"])
-            node_setup = "bash -" if not _sudo_prefix() else "sudo -E bash -"
-            _run(["sh", "-c", f"curl -fsSL https://deb.nodesource.com/setup_22.x | {node_setup}"])
-            _run([*_sudo_prefix(), "apt-get", "install", "-y", "nodejs"])
         else:
-            raise CodexPreparationError("Unsupported Linux distribution. Install Node.js 18+ and run this command again.")
+            if not shutil.which("curl") and any(name in release for name in ("debian", "ubuntu")):
+                # Exit 100 is common on Proxmox when an optional enterprise
+                # repository is unavailable; the required Ubuntu/Debian
+                # packages can still be installed from the remaining mirrors.
+                _run([*_sudo_prefix(), "apt-get", "update"], ok_returncodes=(0, 100))
+                _run([*_sudo_prefix(), "apt-get", "install", "-y", "ca-certificates", "curl"])
+            _install_node_with_nvm()
     elif system == "darwin":
-        if not shutil.which("brew"):
-            raise CodexPreparationError("Homebrew is required to install Node.js on macOS. Install Node.js 18+ first.")
-        _run(["brew", "install", "node"])
+        _install_node_with_nvm()
     elif system == "windows":
         winget = shutil.which("winget")
         if not winget:
@@ -145,6 +201,7 @@ def _install_node_if_needed() -> None:
             "--accept-package-agreements",
             "--accept-source-agreements",
         ])
+        _refresh_windows_node_path()
     else:
         raise CodexPreparationError(f"Unsupported operating system: {platform.system()}")
     if _node_major() < 18:
@@ -154,16 +211,24 @@ def _install_node_if_needed() -> None:
 
 
 def _install_codex() -> None:
-    if _codex_path():
+    existing = _codex_path()
+    if existing and _codex_works(existing):
         return
     npm = shutil.which("npm") or shutil.which("npm.cmd")
     if not npm:
         raise CodexPreparationError("npm was not found after installing Node.js.")
     command = [npm, "install", "-g", "@openai/codex@latest"]
-    if platform.system().lower() in {"linux", "darwin"}:
+    npm_path = Path(npm).resolve()
+    try:
+        npm_path.relative_to(Path.home().resolve())
+        user_owned = True
+    except (OSError, ValueError):
+        user_owned = False
+    if platform.system().lower() in {"linux", "darwin"} and not user_owned:
         command = [*_sudo_prefix(), *command]
     _run(command)
-    if not _codex_path():
+    installed = _codex_path()
+    if not installed or not _codex_works(installed):
         raise CodexPreparationError("Codex CLI installation completed but codex is not on PATH.")
 
 
@@ -457,6 +522,11 @@ def apply_codex_env_to_mapping(
     for key, value in file_values.items():
         if value:
             env[key] = value
+    node_bin = (env.get(CODEX_NODE_BIN_ENV) or "").strip()
+    if node_bin:
+        current_path = env.get("PATH") or os.defpath
+        entries = current_path.split(os.pathsep)
+        env["PATH"] = os.pathsep.join([node_bin, *[entry for entry in entries if entry != node_bin]])
     # Always guarantee the local proxy sentinel unless a non-empty value exists.
     if not (env.get(OPENAI_API_KEY_ENV) or "").strip():
         env[OPENAI_API_KEY_ENV] = file_values.get(OPENAI_API_KEY_ENV) or LOCAL_SENTINEL
@@ -522,16 +592,22 @@ def _set_local_sentinel() -> None:
         # Portacode terminals load this directly, including sessions started by
         # a long-running agent that pre-dates the prepare command.
         codex_home = str(resolve_codex_home())
+        node = shutil.which("node")
+        node_bin = str(Path(node).resolve().parent) if node else ""
+        node_env_line = f"'{CODEX_NODE_BIN_ENV}={node_bin}' " if node_bin else ""
         managed_setup = (
             "install -d -m 755 /etc/portacode && "
             f"printf '%s\\n' "
             f"'{OPENAI_API_KEY_ENV}={LOCAL_SENTINEL}' "
             f"'CODEX_HOME={codex_home}' "
+            f"{node_env_line}"
             f"> {CODEX_ENV_PATH} && "
             f"chmod 644 {CODEX_ENV_PATH} && "
             "printf '%s\\n' '# Managed by portacode prepare codex.' "
             f"'if [ -r {CODEX_ENV_PATH} ]; then' '  set -a' "
-            f"'  . {CODEX_ENV_PATH}' '  set +a' 'fi' > /etc/profile.d/portacode_codex.sh && "
+            f"'  . {CODEX_ENV_PATH}' '  set +a' "
+            f"'  [ -n \"${{{CODEX_NODE_BIN_ENV}:-}}\" ] && export PATH=\"${{{CODEX_NODE_BIN_ENV}}}:$PATH\"' "
+            f"'fi' > /etc/profile.d/portacode_codex.sh && "
             "chmod 644 /etc/profile.d/portacode_codex.sh"
         )
         _run([*_sudo_prefix(), "sh", "-c", managed_setup])
@@ -545,10 +621,15 @@ def _set_local_sentinel() -> None:
         _install_systemd_codex_environment_file()
     elif system == "darwin":
         zshenv = Path.home() / ".zshenv"
-        line = f"export {OPENAI_API_KEY_ENV}={LOCAL_SENTINEL}\n"
-        if not zshenv.exists() or line not in zshenv.read_text(encoding="utf-8", errors="ignore"):
+        lines = [f"export {OPENAI_API_KEY_ENV}={LOCAL_SENTINEL}\n"]
+        node = shutil.which("node")
+        if node:
+            lines.append(f"export PATH={shlex.quote(str(Path(node).resolve().parent))}:$PATH\n")
+        existing = zshenv.read_text(encoding="utf-8", errors="ignore") if zshenv.exists() else ""
+        missing = [line for line in lines if line not in existing]
+        if missing:
             with zshenv.open("a", encoding="utf-8") as handle:
-                handle.write(line)
+                handle.writelines(missing)
         subprocess.run(["launchctl", "setenv", OPENAI_API_KEY_ENV, LOCAL_SENTINEL], check=False)
     elif system == "windows":
         _run(["setx", OPENAI_API_KEY_ENV, LOCAL_SENTINEL])

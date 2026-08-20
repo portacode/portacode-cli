@@ -9,6 +9,7 @@ from portacode.codex_prepare import (
     CodexPreparationError,
     _run,
     _install_node_if_needed,
+    _install_codex,
     ensure_codex_home,
     install_codex_dependencies,
     resolve_codex_home,
@@ -32,8 +33,7 @@ def test_install_codex_dependencies_is_cache_safe(monkeypatch):
 
 
 def test_node_without_npm_is_not_treated_as_ready(monkeypatch):
-    commands = []
-    installed = {"npm": False}
+    installed = {"nvm": False}
     monkeypatch.setattr("portacode.codex_prepare._node_major", lambda: 22)
     monkeypatch.setattr("portacode.codex_prepare.platform.system", lambda: "Linux")
     monkeypatch.setattr(
@@ -44,25 +44,76 @@ def test_node_without_npm_is_not_treated_as_ready(monkeypatch):
         "portacode.codex_prepare.shutil.which",
         lambda name: (
             "/usr/bin/npm"
-            if name == "npm" and installed["npm"]
+            if name == "npm" and installed["nvm"]
             else None
             if name in {"npm", "npm.cmd"}
             else f"/usr/bin/{name}"
         ),
     )
-    def fake_run(command, **kwargs):
-        commands.append(list(command))
-        if list(command)[-3:] == ["install", "-y", "npm"]:
-            installed["npm"] = True
-
     monkeypatch.setattr(
-        "portacode.codex_prepare._run",
-        fake_run,
+        "portacode.codex_prepare._install_node_with_nvm",
+        lambda: installed.__setitem__("nvm", True),
     )
 
     _install_node_if_needed()
 
-    assert any(command[-3:] == ["install", "-y", "npm"] for command in commands)
+    assert installed["nvm"] is True
+
+
+def test_nvm_node_bin_is_added_to_current_path(tmp_path, monkeypatch):
+    from portacode.codex_prepare import _install_node_with_nvm
+
+    home = tmp_path / "root"
+    nvm_dir = home / ".nvm"
+    nvm_dir.mkdir(parents=True)
+    (nvm_dir / "nvm.sh").write_text("# nvm", encoding="utf-8")
+    node = nvm_dir / "versions/node/v22.1.0/bin/node"
+    node.parent.mkdir(parents=True)
+    node.write_text("", encoding="utf-8")
+    monkeypatch.setattr("portacode.codex_prepare.Path.home", lambda: home)
+    monkeypatch.setattr(
+        "portacode.codex_prepare.shutil.which",
+        lambda name: f"/usr/bin/{name}" if name in {"bash", "curl"} else None,
+    )
+    monkeypatch.setattr(
+        "portacode.codex_prepare.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=f"{node}\n", stderr=""),
+    )
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    _install_node_with_nvm()
+
+    assert str(node.parent) == __import__("os").environ["PATH"].split(":")[0]
+
+
+def test_install_codex_does_not_sudo_user_owned_nvm(tmp_path, monkeypatch):
+    home = tmp_path / "root"
+    npm = home / ".nvm/versions/node/v22/bin/npm"
+    npm.parent.mkdir(parents=True)
+    npm.write_text("", encoding="utf-8")
+    commands = []
+    installed = {"value": False}
+    monkeypatch.setattr("portacode.codex_prepare.Path.home", lambda: home)
+    monkeypatch.setattr(
+        "portacode.codex_prepare._codex_path",
+        lambda: str(npm.parent / "codex") if installed["value"] else None,
+    )
+    monkeypatch.setattr("portacode.codex_prepare._codex_works", lambda path: installed["value"])
+    monkeypatch.setattr(
+        "portacode.codex_prepare.shutil.which",
+        lambda name: str(npm) if name == "npm" else None,
+    )
+
+    def fake_run(command, **kwargs):
+        commands.append(list(command))
+        installed["value"] = True
+
+    monkeypatch.setattr("portacode.codex_prepare._run", fake_run)
+    monkeypatch.setattr("portacode.codex_prepare.platform.system", lambda: "Linux")
+
+    _install_codex()
+
+    assert commands == [[str(npm), "install", "-g", "@openai/codex@latest"]]
 
 
 def test_run_allows_proxmox_apt_update_exit_100(monkeypatch):
