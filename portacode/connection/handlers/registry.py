@@ -114,7 +114,7 @@ class CommandRegistry:
             )
             self._inflight_dispatches[command_name] = task
 
-            def _clear_inflight(completed: asyncio.Task[bool]) -> None:
+            def _clear_inflight(completed: asyncio.Task) -> None:
                 if self._inflight_dispatches.get(command_name) is completed:
                     self._inflight_dispatches.pop(command_name, None)
 
