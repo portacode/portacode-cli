@@ -51,3 +51,17 @@ instructions for their subtrees.
 - Before any device-side activation, state which mode is being used: published
   PyPI version via `portacode setversion`, or live checkout via `./connect.sh`.
   Confirm the installed/running version or process source afterward.
+
+## Django uptime watchdog
+
+- A host-side diagnostic watchdog is installed at `/home/menas/uptime` and is
+  managed by the user service `portacode-uptime.service`.
+- Check it with `systemctl --user status portacode-uptime.service` and inspect
+  `/home/menas/uptime/status.log`. Incident bundles are stored privately under
+  `/home/menas/uptime/incidents/`.
+- The watchdog probes Django directly and the public origin, then captures
+  Docker, process, resource, and best-effort worker stack/trace evidence after
+  consecutive failures. It must remain observational: do not add automatic
+  restarts, signals, or other recovery actions that could destroy root-cause
+  evidence or interrupt active Portacode sessions.
+- Read `/home/menas/uptime/README.md` before changing or troubleshooting it.
