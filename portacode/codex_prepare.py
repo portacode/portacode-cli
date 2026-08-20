@@ -405,6 +405,24 @@ def ensure_codex_home() -> Path:
     except Exception:
         LOGGER.debug("Could not refresh managed Codex config.toml", exc_info=True)
     try:
+        source = Path(__file__).parent / "assets" / "skills" / "portacode-image"
+        destination = codex_home / "skills" / "portacode-image"
+        if source.is_dir():
+            shutil.copytree(source, destination, dirs_exist_ok=True)
+            try:
+                from portacode.connection.handlers.runtime_user import (
+                    chown_path_if_possible,
+                    get_default_runtime_user,
+                )
+
+                owner = get_default_runtime_user()
+                for path in (destination, *destination.rglob("*")):
+                    chown_path_if_possible(path, owner)
+            except Exception:
+                pass
+    except Exception:
+        LOGGER.debug("Could not install the managed Portacode image skill", exc_info=True)
+    try:
         _persist_codex_home_env(codex_home)
     except Exception:
         pass

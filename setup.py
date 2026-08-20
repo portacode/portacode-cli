@@ -46,6 +46,8 @@ setup(
             "static/js/**/*.js",
             "static/js/**/*.html",
             "link_capture/bin/*",
+            "assets/skills/**/*.md",
+            "assets/skills/**/*.yaml",
         ],
     },
     python_requires=">=3.8",
@@ -74,6 +76,7 @@ setup(
         "console_scripts": [
             "portacode=portacode.cli:cli",
             "git-credential-portacode=portacode.github_credential:main",
+            "portacode-image=portacode.image_cli:main",
         ]
     },
     classifiers=[

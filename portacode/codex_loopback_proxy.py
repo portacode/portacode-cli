@@ -33,10 +33,17 @@ DEFAULT_GATEWAY_URL = "https://codexapi.portacode.com/v1"
 # proxy.  The ingress envelope therefore needs to be larger than the payload we
 # are willing to send upstream, otherwise oversized tool output is rejected
 # before ``sanitize_responses_request`` gets a chance to crop it.
-MAX_REQUEST_BYTES = 32 * 1024 * 1024
+MAX_REQUEST_BYTES = 64 * 1024 * 1024
 MAX_FORWARD_REQUEST_BYTES = 10 * 1024 * 1024
 MAX_TOOL_OUTPUT_BYTES = 64 * 1024
-ALLOWED_PATHS = {"/health", "/v1/models", "/v1/responses", "/v1/responses/compact"}
+ALLOWED_PATHS = {
+    "/health",
+    "/v1/models",
+    "/v1/responses",
+    "/v1/responses/compact",
+    "/v1/images/generations",
+    "/v1/images/edits",
+}
 MAX_CONCURRENT_UPSTREAM = 8
 
 # Streaming read can idle between SSE chunks; connect/write stay bounded.
@@ -369,7 +376,12 @@ class CodexLoopbackProxy:
             if method == "GET" and path != "/v1/models":
                 await self._write_error(writer, 405, "Method not allowed")
                 return
-            if method == "POST" and path not in {"/v1/responses", "/v1/responses/compact"}:
+            if method == "POST" and path not in {
+                "/v1/responses",
+                "/v1/responses/compact",
+                "/v1/images/generations",
+                "/v1/images/edits",
+            }:
                 await self._write_error(writer, 405, "Method not allowed")
                 return
             await self._forward(writer, method, path, headers, body, req_id=req_id)

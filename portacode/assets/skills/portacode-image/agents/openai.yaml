@@ -1,0 +1,4 @@
+interface:
+  display_name: "Portacode Image"
+  short_description: "Generate and edit images through metered Portacode endpoints"
+  default_prompt: "Generate or edit an image using the metered Portacode image service."

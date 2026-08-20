@@ -171,7 +171,7 @@ async def test_loopback_proxy_health_on_isolated_thread(tmp_path, monkeypatch):
 
     async with httpx.AsyncClient() as client:
         response = await client.get(f"http://127.0.0.1:{port}/health", timeout=5.0)
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     body = response.json()
     assert body["ok"] is True
     assert body["service"] == "portacode-codex-loopback"
@@ -220,6 +220,66 @@ async def test_loopback_proxy_forwards_and_logs_errors(tmp_path, monkeypatch):
         )
     assert response.status_code == 429
     assert response.json()["error"]["message"] == "quota"
+    await proxy.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("local_path", "upstream_suffix", "content_type", "body"),
+    [
+        (
+            "/v1/images/generations",
+            "/device/images/generations",
+            "application/json",
+            b'{"model":"gpt-image-2","prompt":"a lighthouse"}',
+        ),
+        (
+            "/v1/images/edits",
+            "/device/images/edits",
+            "multipart/form-data; boundary=test-boundary",
+            b"--test-boundary--\r\n",
+        ),
+    ],
+)
+async def test_loopback_proxy_forwards_metered_image_paths(
+    tmp_path, monkeypatch, local_path, upstream_suffix, content_type, body
+):
+    keypair = _write_keypair(tmp_path)
+    import portacode.codex_loopback_proxy as proxy_mod
+
+    monkeypatch.setattr(proxy_mod, "CODEX_LOOPBACK_PORT", 0)
+    proxy = CodexLoopbackProxy(keypair, gateway_url="https://example.test/v1")
+    await proxy.start()
+    port = proxy._server.sockets[0].getsockname()[1]
+    seen = {}
+
+    class _Client:
+        def stream(self, method, url, content=None, headers=None):
+            seen.update(method=method, url=url, content=content, headers=headers)
+            return _FakeStreamResponse(
+                status_code=200,
+                headers={"content-type": "application/json"},
+                chunks=[b'{"data":[],"usage":{"total_tokens":1}}'],
+            )
+
+        async def aclose(self):
+            return None
+
+    proxy._client = _Client()
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"http://127.0.0.1:{port}{local_path}",
+            content=body,
+            headers={"content-type": content_type},
+            timeout=5.0,
+        )
+
+    assert response.status_code == 200, response.text
+    assert seen["method"] == "POST"
+    assert seen["url"].endswith(upstream_suffix)
+    assert seen["content"] == body
+    assert seen["headers"]["Content-Type"] == content_type
+    assert "X-Portacode-Signature" in seen["headers"]
     await proxy.stop()
 
 
