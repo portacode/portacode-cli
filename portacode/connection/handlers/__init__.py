@@ -80,6 +80,7 @@ from .codex_handlers import (
     CodexThreadResumeHandler,
     CodexTurnStartHandler,
     CodexTurnInterruptHandler,
+    CodexTaskExecuteHandler,
     CodexPrepareHandler,
 )
 
@@ -150,5 +151,6 @@ __all__ = [
     "CodexThreadResumeHandler",
     "CodexTurnStartHandler",
     "CodexTurnInterruptHandler",
+    "CodexTaskExecuteHandler",
     "CodexPrepareHandler",
 ]

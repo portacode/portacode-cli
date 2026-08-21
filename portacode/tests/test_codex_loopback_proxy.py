@@ -204,6 +204,8 @@ async def test_loopback_proxy_forwards_and_logs_errors(tmp_path, monkeypatch):
             assert method == "POST"
             assert url.endswith("/device/responses")
             assert "X-Portacode-Signature" in headers
+            assert headers["x-portacode-dashboard-chat"] == "chat-1"
+            assert headers["x-portacode-dashboard-request"] == "request-1"
             return fake
 
         async def aclose(self):
@@ -215,7 +217,11 @@ async def test_loopback_proxy_forwards_and_logs_errors(tmp_path, monkeypatch):
         response = await client.post(
             f"http://127.0.0.1:{port}/v1/responses",
             content=b'{"model":"gpt-5","input":"hi"}',
-            headers={"content-type": "application/json"},
+            headers={
+                "content-type": "application/json",
+                "x-portacode-dashboard-chat": "chat-1",
+                "x-portacode-dashboard-request": "request-1",
+            },
             timeout=5.0,
         )
     assert response.status_code == 429

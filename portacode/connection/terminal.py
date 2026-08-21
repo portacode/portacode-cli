@@ -88,6 +88,7 @@ from .handlers import (
     CodexThreadResumeHandler,
     CodexTurnStartHandler,
     CodexTurnInterruptHandler,
+    CodexTaskExecuteHandler,
     CodexPrepareHandler,
 )
 from .handlers.project_aware_file_handlers import (
@@ -614,6 +615,7 @@ class TerminalManager:
         self._command_registry.register(CodexThreadResumeHandler)
         self._command_registry.register(CodexTurnStartHandler)
         self._command_registry.register(CodexTurnInterruptHandler)
+        self._command_registry.register(CodexTaskExecuteHandler)
         self._command_registry.register(CodexPrepareHandler)
 
     # ---------------------------------------------------------------------

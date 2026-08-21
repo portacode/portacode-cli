@@ -16,7 +16,18 @@ from portacode.connection.handlers.codex_handlers import (
     CodexThreadResumeHandler,
     CodexTurnStartHandler,
     CodexTurnInterruptHandler,
+    CodexTaskExecuteHandler,
 )
+
+
+def test_delegated_codex_result_enforces_word_limit():
+    text = " ".join(f"word{index}" for index in range(50))
+    bounded = CodexTaskExecuteHandler._bounded_words(text, 40)
+
+    assert bounded.startswith("word0 word1")
+    assert "word39" in bounded
+    assert "word40" not in bounded
+    assert "response truncated to word limit" in bounded
 
 
 class DummyClientSessionManager:

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import logging
 import mimetypes
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -19,6 +21,8 @@ MAX_LIVE_TEXT_BYTES = 512 * 1024
 MAX_LIVE_ITEMS_PER_THREAD = 64
 MAX_LIVE_SNAPSHOT_BYTES = 4 * 1024 * 1024
 MAX_TRACKED_LIVE_THREADS = 64
+MAX_DELEGATED_RESULT_BYTES = 16 * 1024
+MAX_DELEGATED_DIAGNOSTIC_BYTES = 8 * 1024
 
 _IMAGE_SUFFIXES = {
     ".png",
@@ -942,6 +946,159 @@ class CodexTurnInterruptHandler(CodexAsyncHandler):
         if project_id:
             payload["project_id"] = project_id
         return payload
+
+
+class CodexTaskExecuteHandler(CodexAsyncHandler):
+    """Run one isolated, synchronous Dashboard AI task through ``codex exec``."""
+
+    @property
+    def command_name(self) -> str:
+        return "codex_task_execute"
+
+    @staticmethod
+    def _bounded(value: str, limit: int) -> str:
+        raw = value.encode("utf-8")
+        if len(raw) <= limit:
+            return value
+        return raw[-limit:].decode("utf-8", errors="ignore")
+
+    @staticmethod
+    def _bounded_words(value: str, limit: int) -> str:
+        words = value.split()
+        if len(words) <= limit:
+            return value.strip()
+        return " ".join(words[:limit]).rstrip() + " … [response truncated to word limit]"
+
+    async def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        from portacode.codex_prepare import build_codex_subprocess_env, ensure_codex_home
+        from portacode.connection.handlers.runtime_user import (
+            get_default_runtime_user,
+            get_runtime_user_home,
+            wrap_argv_for_user,
+        )
+
+        cwd = str(message.get("cwd") or "").strip()
+        task = str(message.get("task") or "").strip()
+        chat_id = str(message.get("dashboard_chat_id") or "").strip()
+        request_id = str(message.get("dashboard_request_id") or "").strip()
+        if not cwd or not os.path.isabs(cwd) or not os.path.isdir(cwd):
+            raise ValueError("cwd must be an existing absolute directory")
+        if not task:
+            raise ValueError("task is required")
+        if not chat_id or not request_id:
+            raise ValueError("Dashboard attribution is required")
+        word_limit = min(max(int(message.get("response_word_limit") or 150), 40), 400)
+        timeout_seconds = min(max(int(message.get("timeout_seconds") or 900), 30), 1800)
+
+        prompt = (
+            f"Complete this one bounded task:\n\n{task}\n\n"
+            "Work only in the stated repository/folder and obey its AGENTS.md instructions. "
+            "Before editing, inspect the existing Git status and preserve all pre-existing changes. "
+            "After each completed patch, run appropriate focused verification and commit only the files "
+            "you changed for that patch with a concise commit message. Never include unrelated or "
+            "pre-existing changes in a commit. If the task is read-only, no patch is needed; if you cannot "
+            "safely isolate your changes, do not commit and explain why. Do not publish, push, deploy, or "
+            "perform external release actions unless the task explicitly authorizes them. "
+            f"Your final response must be at most {word_limit} words. State the outcome, commits created, "
+            "verification performed, and any remaining blocker. Do not paste logs or narrate routine steps."
+        )
+
+        executable = CodexAppServer.get_binary_path()
+        if not executable:
+            raise CodexAppServerError(
+                "Codex is not installed. Run `portacode prepare codex` on this device."
+            )
+        runtime_user = get_default_runtime_user()
+        runtime_home = get_runtime_user_home()
+        env = build_codex_subprocess_env()
+        env.update({
+            "HOME": runtime_home,
+            "USER": runtime_user,
+            "LOGNAME": runtime_user,
+            "CODEX_HOME": str(ensure_codex_home()),
+            "PORTACODE_DASHBOARD_CHAT": chat_id,
+            "PORTACODE_DASHBOARD_REQUEST": request_id,
+        })
+        provider_headers = (
+            '{ "X-Portacode-Dashboard-Chat" = "PORTACODE_DASHBOARD_CHAT", '
+            '"X-Portacode-Dashboard-Request" = "PORTACODE_DASHBOARD_REQUEST" }'
+        )
+        argv = [
+            executable, "exec", "--json", "--ephemeral", "--cd", cwd,
+            "--sandbox", "danger-full-access",
+            "--config", f"model_providers.portacode_proxy.env_http_headers={provider_headers}",
+        ]
+        model = str(message.get("model") or "").strip()
+        if model:
+            argv.extend(["--model", model])
+        argv.append(prompt)
+        spawn_argv = wrap_argv_for_user(
+            argv,
+            runtime_user,
+            preserve_env_names=[
+                "OPENAI_API_KEY", "CODEX_HOME", "HOME", "USER", "LOGNAME", "PATH",
+                "LANG", "LC_ALL", "LC_CTYPE", "TERM",
+                "PORTACODE_DASHBOARD_CHAT", "PORTACODE_DASHBOARD_REQUEST",
+            ],
+            cwd=cwd,
+            login=False,
+        )
+        proc = await asyncio.create_subprocess_exec(
+            *spawn_argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            cwd=runtime_home if os.path.isdir(runtime_home) else None,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+            return {
+                "event": "codex_task_result", "success": False, "timed_out": True,
+                "exit_code": proc.returncode, "summary": "Codex task timed out.",
+                "response_word_limit": word_limit,
+            }
+
+        final_text = ""
+        thread_id = ""
+        usage: Dict[str, Any] = {}
+        for raw_line in stdout.decode("utf-8", errors="replace").splitlines():
+            try:
+                event = json.loads(raw_line)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if event.get("type") == "thread.started":
+                thread_id = str(event.get("thread_id") or "")
+            elif event.get("type") == "item.completed":
+                item = event.get("item") or {}
+                if item.get("type") == "agent_message" and item.get("text"):
+                    final_text = str(item["text"])
+            elif event.get("type") == "turn.completed" and isinstance(event.get("usage"), dict):
+                usage = event["usage"]
+
+        success = proc.returncode == 0 and bool(final_text.strip())
+        diagnostic = self._bounded(stderr.decode("utf-8", errors="replace"), MAX_DELEGATED_DIAGNOSTIC_BYTES)
+        summary = self._bounded_words(final_text, word_limit)
+        summary = self._bounded(summary, MAX_DELEGATED_RESULT_BYTES)
+        if not summary:
+            summary = "Codex did not return a final response."
+        return {
+            "event": "codex_task_result",
+            "success": success,
+            "timed_out": False,
+            "exit_code": proc.returncode,
+            "thread_id": thread_id,
+            "summary": summary,
+            "usage": usage,
+            "diagnostic": diagnostic if not success else "",
+            "response_word_limit": word_limit,
+        }
 
 
 class CodexPrepareHandler(CodexAsyncHandler):

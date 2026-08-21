@@ -522,6 +522,14 @@ class CodexLoopbackProxy:
         content_type = request_headers.get("content-type")
         if content_type:
             headers["Content-Type"] = content_type
+        # A Dashboard AI delegated Codex process uses a job-scoped provider
+        # configuration. Forward only its two attribution headers; the gateway
+        # validates both against the authenticated device owner before using
+        # them for accounting. Normal IDE/app-server traffic has neither.
+        for name in ("x-portacode-dashboard-chat", "x-portacode-dashboard-request"):
+            value = request_headers.get(name)
+            if value:
+                headers[name] = value
         gateway_path = path[3:] if path.startswith("/v1") else path
         upstream_url = f"{self.gateway_url}/device{gateway_path}"
         client = self._client
