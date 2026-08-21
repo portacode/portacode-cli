@@ -22,6 +22,7 @@ from .keypair import get_or_create_keypair, keypair_files_exist
 
 DEFAULT_BASE_URL = "https://portacode.com"
 BROKER_PATH = "/dashboard/github/device-credential/"
+CREATE_REPOSITORY_PATH = "/dashboard/github/device-repositories/"
 
 
 def _read_credential_input() -> dict[str, str]:
@@ -78,6 +79,22 @@ def get_credential(repository: str) -> dict[str, str]:
     payload = response.json()
     if response.status_code != 200 or not payload.get("ok"):
         raise RuntimeError(str(payload.get("error") or "GitHub access denied"))
+    return payload
+
+
+def create_repository(*, account: str, name: str, private: bool = True, description: str = "") -> dict[str, object]:
+    body = json.dumps({
+        "account": account, "name": name,
+        "private": private, "description": description,
+    }, separators=(",", ":")).encode("utf-8")
+    base_url = (os.environ.get("PORTACODE_GITHUB_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
+    response = httpx.post(
+        f"{base_url}{CREATE_REPOSITORY_PATH}", content=body,
+        headers=_signed_headers(body, path=CREATE_REPOSITORY_PATH), timeout=30.0,
+    )
+    payload = response.json()
+    if response.status_code not in {200, 201} or not payload.get("ok"):
+        raise RuntimeError(str(payload.get("error") or "GitHub repository creation denied"))
     return payload
 
 

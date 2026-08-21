@@ -42,6 +42,34 @@ def test_get_credential_signs_exact_broker_request(monkeypatch):
     assert observed["headers"] == {"Signed": github_credential.BROKER_PATH}
 
 
+def test_create_repository_signs_exact_device_request(monkeypatch):
+    observed = {}
+
+    class Response:
+        status_code = 201
+
+        @staticmethod
+        def json():
+            return {"ok": True, "full_name": "owner/new-repo", "clone_url": "https://github.com/owner/new-repo.git"}
+
+    def fake_post(url, *, content, headers, timeout):
+        observed.update(url=url, content=content, headers=headers, timeout=timeout)
+        return Response()
+
+    monkeypatch.setattr(github_credential, "_signed_headers", lambda body, path: {"Signed": path})
+    monkeypatch.setattr(github_credential.httpx, "post", fake_post)
+    monkeypatch.setenv("PORTACODE_GITHUB_BASE_URL", "https://portacode.test")
+
+    result = github_credential.create_repository(account="owner", name="new-repo")
+
+    assert result["full_name"] == "owner/new-repo"
+    assert observed["url"].endswith(github_credential.CREATE_REPOSITORY_PATH)
+    assert json.loads(observed["content"]) == {
+        "account": "owner", "name": "new-repo", "private": True, "description": "",
+    }
+    assert observed["headers"] == {"Signed": github_credential.CREATE_REPOSITORY_PATH}
+
+
 def test_helper_outputs_nothing_for_non_github_hosts(monkeypatch, capsys):
     monkeypatch.setattr(github_credential.sys, "stdin", io.StringIO("host=example.com\npath=o/r\n\n"))
     monkeypatch.setattr(github_credential.sys, "argv", ["git-credential-portacode", "get"])

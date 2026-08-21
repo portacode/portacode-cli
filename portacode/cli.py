@@ -83,6 +83,26 @@ def github_setup_command() -> None:
     click.echo(click.style("GitHub access is configured for this device.", fg="green"))
 
 
+@cli.command("github-create")
+@click.argument("name")
+@click.option("--account", required=True, help="Connected GitHub personal or organization login.")
+@click.option("--public", "is_public", is_flag=True, help="Create a public repository (private is the default).")
+@click.option("--description", default="", help="Optional repository description.")
+def github_create_command(name: str, account: str, is_public: bool, description: str) -> None:
+    """Create a GitHub repository through this device's scoped permission."""
+    from .github_credential import create_repository
+
+    try:
+        result = create_repository(
+            account=account, name=name,
+            private=not is_public, description=description,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(f"Could not create GitHub repository: {exc}") from exc
+    click.echo(click.style(f"Created {result['full_name']}", fg="green"))
+    click.echo(str(result["clone_url"]))
+
+
 @cli.command()
 @click.option("--gateway", "gateway", "-g", help="Gateway websocket URL (overrides env/ default)")
 @click.option("--debug", "debug", is_flag=True, help="Enable debug logging")
