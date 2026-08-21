@@ -2489,6 +2489,30 @@ def _cacheable_bootstrap_steps(package_manager: str) -> List[Dict[str, Any]]:
             "retry_delay_s": 5,
             "retry_on": _INSTALL_RETRY_ON,
         })
+    # Docker is part of the cached baseline: install only when missing, use
+    # distro-native packages where available, and verify both Compose v2 and
+    # daemon usability before preserving the image. This covers Debian/RHEL
+    # families and Alpine without assuming systemd is PID 1.
+    steps.append({
+        "name": "install_docker_compose",
+        "cmd": (
+            "if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then :; "
+            "elif command -v apk >/dev/null 2>&1; then apk add --no-cache docker docker-cli-compose; "
+            "elif command -v apt-get >/dev/null 2>&1; then apt-get update -y || test $? -eq 100; "
+            "apt-get install -y ca-certificates curl docker.io docker-compose-v2 || "
+            "(curl -fsSL https://get.docker.com | sh); "
+            "elif command -v dnf >/dev/null 2>&1; then dnf install -y docker docker-compose-plugin || "
+            "(curl -fsSL https://get.docker.com | sh); "
+            "elif command -v yum >/dev/null 2>&1; then yum install -y docker docker-compose-plugin || "
+            "(curl -fsSL https://get.docker.com | sh); "
+            "else curl -fsSL https://get.docker.com | sh; fi; "
+            "command -v docker; docker compose version; "
+            "(docker info >/dev/null 2>&1 || (command -v systemctl >/dev/null 2>&1 && "
+            "systemctl start docker >/dev/null 2>&1 && docker info >/dev/null 2>&1))"
+        ),
+        "retries": 2,
+        "retry_delay_s": 5,
+    })
     steps.extend([
         {"name": "create_portacode_venv", "cmd": f"python3 -m venv --clear {PORTACODE_VENV_DIR}", "retries": 0},
         {"name": "install_portacode", "cmd": _pinned_portacode_install_command(), "retries": 0},

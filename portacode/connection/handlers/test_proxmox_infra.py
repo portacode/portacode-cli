@@ -187,7 +187,7 @@ class ProxmoxInfraHandlerTests(TestCase):
         self.assertEqual(_cache_source_display_name(source), "Alpine 3.17")
         self.assertEqual(
             _cache_template_hostname(source),
-            "cache-alpine-3-17-v2026-08-09-6-4g",
+            "cache-alpine-3-17-v2026-08-21-1-4g",
         )
 
     def test_reconciled_external_deletion_is_not_reinserted_from_local_record(self):
