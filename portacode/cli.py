@@ -84,15 +84,27 @@ def github_setup_command() -> None:
 
 
 @cli.command("github-create")
-@click.argument("name")
-@click.option("--account", required=True, help="Connected GitHub personal or organization login.")
+@click.argument("repository")
+@click.option("--account", help="Connected GitHub login (only needed when REPOSITORY has no owner).")
 @click.option("--public", "is_public", is_flag=True, help="Create a public repository (private is the default).")
 @click.option("--description", default="", help="Optional repository description.")
-def github_create_command(name: str, account: str, is_public: bool, description: str) -> None:
+def github_create_command(repository: str, account: Optional[str], is_public: bool, description: str) -> None:
     """Create a GitHub repository through this device's scoped permission."""
     from .github_credential import create_repository
 
     try:
+        repository = repository.strip().removesuffix(".git").strip("/")
+        if "/" in repository:
+            owner, name = repository.split("/", 1)
+            if account and account.casefold() != owner.casefold():
+                raise ValueError("--account does not match the repository owner")
+            account = owner
+        else:
+            name = repository
+        if not account:
+            raise ValueError(
+                "Use OWNER/REPOSITORY so Portacode can select the GitHub connection automatically"
+            )
         result = create_repository(
             account=account, name=name,
             private=not is_public, description=description,

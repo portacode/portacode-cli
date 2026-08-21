@@ -94,7 +94,10 @@ def create_repository(*, account: str, name: str, private: bool = True, descript
     )
     payload = response.json()
     if response.status_code not in {200, 201} or not payload.get("ok"):
-        raise RuntimeError(str(payload.get("error") or "GitHub repository creation denied"))
+        message = str(payload.get("error") or "GitHub repository creation denied")
+        if payload.get("approval_url"):
+            message = f"{message}\nApprove the GitHub permission here: {payload['approval_url']}"
+        raise RuntimeError(message)
     return payload
 
 

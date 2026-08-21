@@ -1,7 +1,10 @@
 import io
 import json
 
+from click.testing import CliRunner
+
 from portacode import github_credential
+from portacode.cli import cli
 
 
 def test_repository_parser_is_github_and_path_scoped():
@@ -68,6 +71,54 @@ def test_create_repository_signs_exact_device_request(monkeypatch):
         "account": "owner", "name": "new-repo", "private": True, "description": "",
     }
     assert observed["headers"] == {"Signed": github_credential.CREATE_REPOSITORY_PATH}
+
+
+def test_github_create_selects_connection_from_repository_owner(monkeypatch):
+    observed = {}
+
+    def fake_create_repository(**kwargs):
+        observed.update(kwargs)
+        return {
+            "full_name": "portacode/exposify",
+            "clone_url": "https://github.com/portacode/exposify.git",
+        }
+
+    monkeypatch.setattr(github_credential, "create_repository", fake_create_repository)
+
+    result = CliRunner().invoke(cli, ["github-create", "portacode/exposify"])
+
+    assert result.exit_code == 0, result.output
+    assert observed == {
+        "account": "portacode", "name": "exposify",
+        "private": True, "description": "",
+    }
+    assert "https://github.com/portacode/exposify.git" in result.output
+
+
+def test_github_create_requires_owner_without_legacy_account_option():
+    result = CliRunner().invoke(cli, ["github-create", "exposify"])
+
+    assert result.exit_code != 0
+    assert "Use OWNER/REPOSITORY" in result.output
+
+
+def test_repository_create_error_includes_permission_approval_url(monkeypatch):
+    class Response:
+        status_code = 403
+
+        @staticmethod
+        def json():
+            return {
+                "ok": False,
+                "error": "GitHub approval required",
+                "approval_url": "https://github.com/settings/installations/123",
+            }
+
+    monkeypatch.setattr(github_credential, "_signed_headers", lambda body, path: {})
+    monkeypatch.setattr(github_credential.httpx, "post", lambda *args, **kwargs: Response())
+
+    with __import__("pytest").raises(RuntimeError, match="settings/installations/123"):
+        github_credential.create_repository(account="portacode", name="exposify")
 
 
 def test_helper_outputs_nothing_for_non_github_hosts(monkeypatch, capsys):

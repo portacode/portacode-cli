@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -266,6 +267,18 @@ def test_build_codex_subprocess_env_defaults_sentinel_without_file(tmp_path):
     missing = tmp_path / "missing.env"
     env = build_codex_subprocess_env(base={}, path=missing)
     assert env["OPENAI_API_KEY"] == LOCAL_SENTINEL
+
+
+def test_build_codex_subprocess_env_exposes_source_checkout_to_commands(tmp_path):
+    from portacode.codex_prepare import build_codex_subprocess_env
+
+    env = build_codex_subprocess_env(
+        base={"PATH": "/usr/bin", "PYTHONPATH": "/existing"},
+        path=tmp_path / "missing.env",
+    )
+
+    source_root = str(Path(__file__).resolve().parents[2])
+    assert env["PYTHONPATH"].split(":") == [source_root, "/existing"]
 
 
 @pytest.mark.asyncio

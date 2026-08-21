@@ -234,3 +234,9 @@ def test_ensure_codex_home_repairs_runtime_user_directory_ownership(tmp_path, mo
 
     assert ensure_codex_home() == home
     assert ownership_calls == [(home, home / "sessions")]
+    assert (home / "skills" / "portacode-image" / "SKILL.md").is_file()
+    assert (home / "skills" / "portacode-github" / "SKILL.md").is_file()
+    assert (home / "skills" / "portacode-github" / "scripts" / "create_repository.py").is_file()
+    assert (home / "portacode-source-root").read_text(encoding="utf-8").strip() == str(
+        Path(__file__).resolve().parents[2]
+    )

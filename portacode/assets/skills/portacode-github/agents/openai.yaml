@@ -1,0 +1,4 @@
+interface:
+  display_name: "Portacode GitHub"
+  short_description: "Create permitted GitHub repositories and push code"
+  default_prompt: "Create a permitted GitHub repository and push the current project to it."

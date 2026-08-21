@@ -470,10 +470,20 @@ def ensure_codex_home() -> Path:
     except Exception:
         LOGGER.debug("Could not refresh managed Codex config.toml", exc_info=True)
     try:
-        source = Path(__file__).parent / "assets" / "skills" / "portacode-image"
-        destination = codex_home / "skills" / "portacode-image"
-        if source.is_dir():
+        skills_source = Path(__file__).parent / "assets" / "skills"
+        installed_skills = []
+        for source in skills_source.iterdir() if skills_source.is_dir() else ():
+            if not source.is_dir():
+                continue
+            destination = codex_home / "skills" / source.name
             shutil.copytree(source, destination, dirs_exist_ok=True)
+            installed_skills.append(destination)
+        source_root = Path(__file__).resolve().parents[1]
+        if (source_root / "connect.py").is_file() and (source_root / ".git").exists():
+            (codex_home / "portacode-source-root").write_text(
+                f"{source_root}\n", encoding="utf-8"
+            )
+        if installed_skills:
             try:
                 from portacode.connection.handlers.runtime_user import (
                     chown_path_if_possible,
@@ -481,12 +491,16 @@ def ensure_codex_home() -> Path:
                 )
 
                 owner = get_default_runtime_user()
-                for path in (destination, *destination.rglob("*")):
-                    chown_path_if_possible(path, owner)
+                for destination in installed_skills:
+                    for path in (destination, *destination.rglob("*")):
+                        chown_path_if_possible(path, owner)
+                source_marker = codex_home / "portacode-source-root"
+                if source_marker.exists():
+                    chown_path_if_possible(source_marker, owner)
             except Exception:
                 pass
     except Exception:
-        LOGGER.debug("Could not install the managed Portacode image skill", exc_info=True)
+        LOGGER.debug("Could not install managed Portacode skills", exc_info=True)
     try:
         _persist_codex_home_env(codex_home)
     except Exception:
@@ -542,6 +556,14 @@ def build_codex_subprocess_env(
     """Environment for Codex CLI / app-server subprocesses."""
     env = dict(base or os.environ)
     apply_codex_env_to_mapping(env, path=path)
+    # In ./connect.sh development mode, commands launched by Codex must import
+    # this checkout even when the active project lives elsewhere.
+    source_root = Path(__file__).resolve().parents[1]
+    if (source_root / "connect.py").is_file() and (source_root / ".git").exists():
+        entries = (env.get("PYTHONPATH") or "").split(os.pathsep)
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(source_root), *[entry for entry in entries if entry and entry != str(source_root)]]
+        )
     try:
         env["CODEX_HOME"] = str(ensure_codex_home())
     except Exception:
