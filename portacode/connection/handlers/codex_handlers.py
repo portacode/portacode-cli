@@ -969,6 +969,21 @@ class CodexTaskExecuteHandler(CodexAsyncHandler):
             return value.strip()
         return " ".join(words[:limit]).rstrip() + " … [response truncated to word limit]"
 
+    @staticmethod
+    def _exec_argv(
+        executable: str, cwd: str, provider_headers: str, prompt: str,
+        model: str = "",
+    ) -> List[str]:
+        argv = [
+            executable, "exec", "--json", "--ephemeral", "--cd", cwd,
+            "--skip-git-repo-check", "--sandbox", "danger-full-access",
+            "--config", f"model_providers.portacode_proxy.env_http_headers={provider_headers}",
+        ]
+        if model:
+            argv.extend(["--model", model])
+        argv.append(prompt)
+        return argv
+
     async def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
         from portacode.codex_prepare import build_codex_subprocess_env, ensure_codex_home
         from portacode.connection.handlers.runtime_user import (
@@ -1023,15 +1038,8 @@ class CodexTaskExecuteHandler(CodexAsyncHandler):
             '{ "X-Portacode-Dashboard-Chat" = "PORTACODE_DASHBOARD_CHAT", '
             '"X-Portacode-Dashboard-Request" = "PORTACODE_DASHBOARD_REQUEST" }'
         )
-        argv = [
-            executable, "exec", "--json", "--ephemeral", "--cd", cwd,
-            "--sandbox", "danger-full-access",
-            "--config", f"model_providers.portacode_proxy.env_http_headers={provider_headers}",
-        ]
         model = str(message.get("model") or "").strip()
-        if model:
-            argv.extend(["--model", model])
-        argv.append(prompt)
+        argv = self._exec_argv(executable, cwd, provider_headers, prompt, model)
         spawn_argv = wrap_argv_for_user(
             argv,
             runtime_user,

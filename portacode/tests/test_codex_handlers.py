@@ -30,6 +30,15 @@ def test_delegated_codex_result_enforces_word_limit():
     assert "response truncated to word limit" in bounded
 
 
+def test_delegated_codex_allows_non_git_project_folders():
+    argv = CodexTaskExecuteHandler._exec_argv(
+        "/usr/bin/codex", "/work/project", "headers", "task",
+    )
+
+    assert "--skip-git-repo-check" in argv
+    assert argv[-1] == "task"
+
+
 class DummyClientSessionManager:
     def __init__(self, sessions: list[str] | None = None):
         self.sessions = sessions or ["sess-1"]
