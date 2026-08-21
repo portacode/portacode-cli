@@ -5235,6 +5235,21 @@ class ResizeProxmoxContainerHandler(SyncHandler):
         else:
             _write_container_record(vmid, dict(record_updates, vmid=vmid, device_id=child_device_id))
 
+        # The cached base summary is a Proxmox scan and intentionally wins over
+        # mutable values in local records. Refresh it now that the verified
+        # resize is complete so availability changes atomically with the
+        # operation instead of waiting for the periodic inventory pass.
+        reconciliation = reconcile_managed_containers_inventory()
+        for _attempt in range(2):
+            if reconciliation.get("refreshed") or reconciliation.get("reason") != "state_changed":
+                break
+            reconciliation = reconcile_managed_containers_inventory()
+        if not reconciliation.get("refreshed"):
+            logger.warning(
+                "Resize completed but the managed inventory refresh was deferred: %s",
+                reconciliation,
+            )
+
         return {
             "event": "proxmox_container_resized",
             "success": True,
@@ -5251,6 +5266,7 @@ class ResizeProxmoxContainerHandler(SyncHandler):
                 "disk_gib": after_disk,
             },
             "message": "Container resources updated successfully.",
+            "inventory_refresh": reconciliation,
             "infra": get_infra_snapshot(),
         }
 

@@ -40,6 +40,10 @@ from portacode.connection.handlers.proxmox_infra import (
 
 class ProxmoxInfraHandlerTests(TestCase):
     @patch("portacode.connection.handlers.proxmox_infra.get_infra_snapshot", return_value={})
+    @patch(
+        "portacode.connection.handlers.proxmox_infra.reconcile_managed_containers_inventory",
+        return_value={"refreshed": True},
+    )
     @patch("portacode.connection.handlers.proxmox_infra._update_container_record")
     @patch("portacode.connection.handlers.proxmox_infra._ensure_container_managed")
     @patch("portacode.connection.handlers.proxmox_infra._resolve_vmid_for_device", return_value=101)
@@ -47,7 +51,7 @@ class ProxmoxInfraHandlerTests(TestCase):
     @patch("portacode.connection.handlers.proxmox_infra._connect_proxmox")
     @patch("portacode.connection.handlers.proxmox_infra._ensure_infra_configured", return_value={})
     def test_resize_applies_absolute_targets_and_grows_disk_last(
-        self, _config, connect, _node, _resolve, ensure_managed, update, _snapshot
+        self, _config, connect, _node, _resolve, ensure_managed, update, reconcile, _snapshot
     ):
         current = {"cpulimit": 1, "memory": 1024, "rootfs": "local-lvm:vm-101-disk-0,size=4G"}
         verified = {"cpulimit": 1.5, "memory": 2048, "rootfs": "local-lvm:vm-101-disk-0,size=8G"}
@@ -63,6 +67,8 @@ class ProxmoxInfraHandlerTests(TestCase):
         lxc.config.put.assert_called_once_with(memory=2048, cores=2, cpulimit=1.5, cpuunits=150)
         lxc.resize.put.assert_called_once_with(disk="rootfs", size="8G")
         update.assert_called_once()
+        reconcile.assert_called_once_with()
+        self.assertTrue(result["inventory_refresh"]["refreshed"])
         self.assertEqual(result["after"]["disk_gib"], 8.0)
 
     @patch("portacode.connection.handlers.proxmox_infra._ensure_container_managed")
