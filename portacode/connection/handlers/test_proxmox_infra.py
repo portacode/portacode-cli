@@ -4,6 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
+from portacode.connection.handlers import proxmox_infra as infra_module
 from portacode.connection.handlers.proxmox_infra import (
     RemoveProxmoxContainerHandler,
     ResizeProxmoxContainerHandler,
@@ -39,11 +40,55 @@ from portacode.connection.handlers.proxmox_infra import (
 
 
 class ProxmoxInfraHandlerTests(TestCase):
+    def test_authoritative_resize_record_updates_allocation_delta_under_shared_lock(self):
+        state = {
+            "initialized": True,
+            "base_summary": {
+                "containers": [{
+                    "vmid": 101, "device_id": "42", "ram_mib": 1024,
+                    "disk_gib": 4, "cpu_share": 1.0,
+                }],
+                "missing_containers": [],
+                "available_ram_mib": 10000,
+                "available_disk_gib": 100.0,
+                "available_cpu_share": 8.0,
+                "allocated_ram_mib": 1024,
+                "allocated_disk_gib": 4.0,
+                "allocated_cpu_share": 1.0,
+                "default_storage": "local-lvm",
+            },
+            "initial_totals": {"ram_mib": 1024, "disk_gib": 4, "cpu_share": 1.0},
+            "records": {"101": {
+                "vmid": 101, "device_id": "42", "ram_mib": 1024,
+                "disk_gib": 4, "cpus": 1.0,
+            }},
+            "pending": {},
+            "revision": 4,
+        }
+        resized_record = {
+            "vmid": 101, "device_id": "42", "ram_mib": 2048,
+            "disk_gib": 8, "cpus": 1.5,
+        }
+
+        with patch.object(infra_module, "_MANAGED_CONTAINERS_STATE", state), patch.object(
+            infra_module, "_initialize_managed_containers_state"
+        ):
+            infra_module._register_container_record(
+                101,
+                resized_record,
+                authoritative_summary_updates={
+                    "ram_mib": 2048, "disk_gib": 8, "cpu_share": 1.5,
+                },
+            )
+            summary = infra_module._get_managed_containers_summary()
+
+        self.assertEqual(state["initial_totals"]["ram_mib"], 1024)
+        self.assertEqual(state["revision"], 5)
+        self.assertEqual(summary["available_ram_mib"], 8976)
+        self.assertEqual(summary["available_disk_gib"], 96.0)
+        self.assertEqual(summary["available_cpu_share"], 7.5)
+
     @patch("portacode.connection.handlers.proxmox_infra.get_infra_snapshot", return_value={})
-    @patch(
-        "portacode.connection.handlers.proxmox_infra.reconcile_managed_containers_inventory",
-        return_value={"refreshed": True},
-    )
     @patch("portacode.connection.handlers.proxmox_infra._update_container_record")
     @patch("portacode.connection.handlers.proxmox_infra._ensure_container_managed")
     @patch("portacode.connection.handlers.proxmox_infra._resolve_vmid_for_device", return_value=101)
@@ -51,7 +96,7 @@ class ProxmoxInfraHandlerTests(TestCase):
     @patch("portacode.connection.handlers.proxmox_infra._connect_proxmox")
     @patch("portacode.connection.handlers.proxmox_infra._ensure_infra_configured", return_value={})
     def test_resize_applies_absolute_targets_and_grows_disk_last(
-        self, _config, connect, _node, _resolve, ensure_managed, update, reconcile, _snapshot
+        self, _config, connect, _node, _resolve, ensure_managed, update, _snapshot
     ):
         current = {"cpulimit": 1, "memory": 1024, "rootfs": "local-lvm:vm-101-disk-0,size=4G"}
         verified = {"cpulimit": 1.5, "memory": 2048, "rootfs": "local-lvm:vm-101-disk-0,size=8G"}
@@ -66,9 +111,16 @@ class ProxmoxInfraHandlerTests(TestCase):
 
         lxc.config.put.assert_called_once_with(memory=2048, cores=2, cpulimit=1.5, cpuunits=150)
         lxc.resize.put.assert_called_once_with(disk="rootfs", size="8G")
-        update.assert_called_once()
-        reconcile.assert_called_once_with()
-        self.assertTrue(result["inventory_refresh"]["refreshed"])
+        update.assert_called_once_with(
+            101,
+            {
+                "cpus": 1.5, "cpulimit": 1.5, "cpuunits": 150,
+                "cores": 2, "ram_mib": 2048, "memory": 2048, "disk_gib": 8,
+            },
+            authoritative_summary_updates={
+                "cpu_share": 1.5, "ram_mib": 2048, "disk_gib": 8.0,
+            },
+        )
         self.assertEqual(result["after"]["disk_gib"], 8.0)
 
     @patch("portacode.connection.handlers.proxmox_infra._ensure_container_managed")

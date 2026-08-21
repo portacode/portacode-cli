@@ -2997,12 +2997,23 @@ def _require_successful_proxmox_task(
         )
 
 
-def _register_container_record(vmid: int, payload: Dict[str, Any], reservation_id: Optional[str] = None) -> None:
+def _register_container_record(
+    vmid: int,
+    payload: Dict[str, Any],
+    reservation_id: Optional[str] = None,
+    authoritative_summary_updates: Optional[Dict[str, Any]] = None,
+) -> None:
     _initialize_managed_containers_state()
     with _acquire_state_lock("container record update"):
         if reservation_id:
             _MANAGED_CONTAINERS_STATE["pending"].pop(reservation_id, None)
         _MANAGED_CONTAINERS_STATE["records"][str(vmid)] = payload.copy()
+        if authoritative_summary_updates:
+            base_summary = _MANAGED_CONTAINERS_STATE.get("base_summary") or {}
+            for container in base_summary.get("containers", []):
+                if str(container.get("vmid")) == str(vmid):
+                    container.update(authoritative_summary_updates)
+                    break
         _MANAGED_CONTAINERS_STATE["revision"] = int(
             _MANAGED_CONTAINERS_STATE.get("revision") or 0
         ) + 1
@@ -3017,11 +3028,21 @@ def _unregister_container_record(vmid: int) -> None:
         ) + 1
 
 
-def _write_container_record(vmid: int, payload: Dict[str, Any], reservation_id: Optional[str] = None) -> None:
+def _write_container_record(
+    vmid: int,
+    payload: Dict[str, Any],
+    reservation_id: Optional[str] = None,
+    authoritative_summary_updates: Optional[Dict[str, Any]] = None,
+) -> None:
     _ensure_containers_dir()
     path = CONTAINERS_DIR / f"ct-{vmid}.json"
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    _register_container_record(vmid, payload, reservation_id=reservation_id)
+    _register_container_record(
+        vmid,
+        payload,
+        reservation_id=reservation_id,
+        authoritative_summary_updates=authoritative_summary_updates,
+    )
 
 
 def _read_container_record(vmid: int) -> Dict[str, Any]:
@@ -3031,10 +3052,18 @@ def _read_container_record(vmid: int) -> Dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _update_container_record(vmid: int, updates: Dict[str, Any]) -> None:
+def _update_container_record(
+    vmid: int,
+    updates: Dict[str, Any],
+    authoritative_summary_updates: Optional[Dict[str, Any]] = None,
+) -> None:
     record = _read_container_record(vmid)
     record.update(updates)
-    _write_container_record(vmid, record)
+    _write_container_record(
+        vmid,
+        record,
+        authoritative_summary_updates=authoritative_summary_updates,
+    )
 
 
 def _remove_container_record(vmid: int) -> None:
@@ -5230,24 +5259,22 @@ class ResizeProxmoxContainerHandler(SyncHandler):
             "memory": ram_mib,
             "disk_gib": disk_gib,
         }
+        summary_updates = {
+            "cpu_share": after_cpu,
+            "ram_mib": after_ram,
+            "disk_gib": after_disk,
+        }
         if record:
-            _update_container_record(vmid, record_updates)
+            _update_container_record(
+                vmid,
+                record_updates,
+                authoritative_summary_updates=summary_updates,
+            )
         else:
-            _write_container_record(vmid, dict(record_updates, vmid=vmid, device_id=child_device_id))
-
-        # The cached base summary is a Proxmox scan and intentionally wins over
-        # mutable values in local records. Refresh it now that the verified
-        # resize is complete so availability changes atomically with the
-        # operation instead of waiting for the periodic inventory pass.
-        reconciliation = reconcile_managed_containers_inventory()
-        for _attempt in range(2):
-            if reconciliation.get("refreshed") or reconciliation.get("reason") != "state_changed":
-                break
-            reconciliation = reconcile_managed_containers_inventory()
-        if not reconciliation.get("refreshed"):
-            logger.warning(
-                "Resize completed but the managed inventory refresh was deferred: %s",
-                reconciliation,
+            _write_container_record(
+                vmid,
+                dict(record_updates, vmid=vmid, device_id=child_device_id),
+                authoritative_summary_updates=summary_updates,
             )
 
         return {
@@ -5266,7 +5293,6 @@ class ResizeProxmoxContainerHandler(SyncHandler):
                 "disk_gib": after_disk,
             },
             "message": "Container resources updated successfully.",
-            "inventory_refresh": reconciliation,
             "infra": get_infra_snapshot(),
         }
 
