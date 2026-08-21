@@ -27,6 +27,7 @@ GUEST_HOST_REQUEST_COMMANDS = frozenset(
         "restart_proxmox_container",
         "remove_proxmox_container",
         "create_proxmox_container",
+        "resize_proxmox_container",
     }
 )
 GUEST_HOST_COMMAND_OPERATIONS = {
@@ -36,6 +37,7 @@ GUEST_HOST_COMMAND_OPERATIONS = {
     "restart_proxmox_container": "power",
     "remove_proxmox_container": "delete",
     "create_proxmox_container": "provision",
+    "resize_proxmox_container": "resize",
 }
 
 # Every advertised operation is mapped to its existing, independently
@@ -49,6 +51,7 @@ GUEST_HOST_EXECUTABLE_COMMANDS = frozenset(
         "restart_proxmox_container",
         "remove_proxmox_container",
         "create_proxmox_container",
+        "resize_proxmox_container",
     }
 )
 

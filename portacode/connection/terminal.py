@@ -70,6 +70,7 @@ from .handlers import (
     UpdatePortacodeHandler,
     ConfigureProxmoxInfraHandler,
     CreateProxmoxContainerHandler,
+    ResizeProxmoxContainerHandler,
     RevertProxmoxInfraHandler,
     StartPortacodeServiceHandler,
     StartProxmoxContainerHandler,
@@ -595,6 +596,7 @@ class TerminalManager:
         # System management handlers
         self._command_registry.register(ConfigureProxmoxInfraHandler)
         self._command_registry.register(CreateProxmoxContainerHandler)
+        self._command_registry.register(ResizeProxmoxContainerHandler)
         self._command_registry.register(StartPortacodeServiceHandler)
         self._command_registry.register(StartProxmoxContainerHandler)
         self._command_registry.register(StopProxmoxContainerHandler)

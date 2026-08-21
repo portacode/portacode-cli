@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 from portacode.connection.handlers.proxmox_infra import (
     RemoveProxmoxContainerHandler,
+    ResizeProxmoxContainerHandler,
     RestartProxmoxContainerHandler,
     _build_full_container_summary,
     _compose_managed_containers_summary,
@@ -38,6 +39,49 @@ from portacode.connection.handlers.proxmox_infra import (
 
 
 class ProxmoxInfraHandlerTests(TestCase):
+    @patch("portacode.connection.handlers.proxmox_infra.get_infra_snapshot", return_value={})
+    @patch("portacode.connection.handlers.proxmox_infra._update_container_record")
+    @patch("portacode.connection.handlers.proxmox_infra._ensure_container_managed")
+    @patch("portacode.connection.handlers.proxmox_infra._resolve_vmid_for_device", return_value=101)
+    @patch("portacode.connection.handlers.proxmox_infra._get_node_from_config", return_value="pve")
+    @patch("portacode.connection.handlers.proxmox_infra._connect_proxmox")
+    @patch("portacode.connection.handlers.proxmox_infra._ensure_infra_configured", return_value={})
+    def test_resize_applies_absolute_targets_and_grows_disk_last(
+        self, _config, connect, _node, _resolve, ensure_managed, update, _snapshot
+    ):
+        current = {"cpulimit": 1, "memory": 1024, "rootfs": "local-lvm:vm-101-disk-0,size=4G"}
+        verified = {"cpulimit": 1.5, "memory": 2048, "rootfs": "local-lvm:vm-101-disk-0,size=8G"}
+        ensure_managed.return_value = ({"device_id": "42"}, current)
+        lxc = connect.return_value.nodes.return_value.lxc.return_value
+        lxc.resize.put.return_value = None
+        lxc.config.get.return_value = verified
+
+        result = ResizeProxmoxContainerHandler(MagicMock(), {}).execute({
+            "child_device_id": "42", "cpus": 1.5, "ram_mib": 2048, "disk_gib": 8,
+        })
+
+        lxc.config.put.assert_called_once_with(memory=2048, cores=2, cpulimit=1.5, cpuunits=150)
+        lxc.resize.put.assert_called_once_with(disk="rootfs", size="8G")
+        update.assert_called_once()
+        self.assertEqual(result["after"]["disk_gib"], 8.0)
+
+    @patch("portacode.connection.handlers.proxmox_infra._ensure_container_managed")
+    @patch("portacode.connection.handlers.proxmox_infra._resolve_vmid_for_device", return_value=101)
+    @patch("portacode.connection.handlers.proxmox_infra._get_node_from_config", return_value="pve")
+    @patch("portacode.connection.handlers.proxmox_infra._connect_proxmox")
+    @patch("portacode.connection.handlers.proxmox_infra._ensure_infra_configured", return_value={})
+    def test_resize_rejects_disk_shrink_before_mutation(
+        self, _config, connect, _node, _resolve, ensure_managed
+    ):
+        ensure_managed.return_value = ({"device_id": "42"}, {
+            "cpulimit": 1, "memory": 1024, "rootfs": "local-lvm:vm-101-disk-0,size=8G",
+        })
+        with self.assertRaisesRegex(ValueError, "cannot be reduced"):
+            ResizeProxmoxContainerHandler(MagicMock(), {}).execute({
+                "child_device_id": "42", "cpus": 1, "ram_mib": 1024, "disk_gib": 4,
+            })
+        connect.return_value.nodes.return_value.lxc.return_value.config.put.assert_not_called()
+
     @patch("portacode.connection.handlers.proxmox_infra.get_infra_snapshot", return_value={})
     @patch("portacode.connection.handlers.proxmox_infra._update_container_record")
     @patch("portacode.connection.handlers.proxmox_infra._start_container")

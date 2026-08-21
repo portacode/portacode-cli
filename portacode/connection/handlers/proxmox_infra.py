@@ -5130,6 +5130,131 @@ class StartProxmoxContainerHandler(SyncHandler):
         }
 
 
+class ResizeProxmoxContainerHandler(SyncHandler):
+    """Resize an existing managed LXC container using absolute targets."""
+
+    @property
+    def command_name(self) -> str:
+        return "resize_proxmox_container"
+
+    def execute(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        child_device_id = str(message.get("child_device_id") or "").strip()
+        if not child_device_id:
+            raise ValueError("child_device_id is required for resize_proxmox_container")
+
+        cpus = _validate_positive_number(message.get("cpus"), 0)
+        ram_mib_value = _validate_positive_number(message.get("ram_mib"), 0)
+        ram_mib = int(ram_mib_value)
+        disk_gib_value = _validate_positive_number(message.get("disk_gib"), 0)
+        if cpus <= 0:
+            raise ValueError("cpus must be greater than 0")
+        if ram_mib <= 0:
+            raise ValueError("ram_mib must be a positive integer")
+        if not float(ram_mib_value).is_integer():
+            raise ValueError("ram_mib must be a positive integer")
+        if disk_gib_value <= 0:
+            raise ValueError("disk_gib must be a positive integer")
+        if not float(disk_gib_value).is_integer():
+            raise ValueError("disk_gib must be a whole number")
+        disk_gib = int(disk_gib_value)
+
+        config = _ensure_infra_configured()
+        proxmox = _connect_proxmox(config)
+        node = _get_node_from_config(config)
+        try:
+            vmid = _resolve_vmid_for_device(child_device_id)
+        except _DeviceLookupError:
+            vmid = _resolve_vmid_for_device_in_proxmox(proxmox, node, child_device_id)
+        record, current_config = _ensure_container_managed(
+            proxmox, node, vmid, device_id=child_device_id
+        )
+
+        before_cpu = _pick_container_cpu_share("lxc", current_config, {})
+        before_ram = int(round(_pick_container_ram_mib("lxc", current_config, {})))
+        before_disk = _pick_container_disk_gib("lxc", current_config, {})
+        if before_disk <= 0:
+            raise RuntimeError("Unable to determine the current root filesystem size")
+        if disk_gib + 1e-9 < before_disk:
+            raise ValueError(
+                "disk_gib cannot be reduced (current %.3g GiB, requested %s GiB)"
+                % (before_disk, disk_gib)
+            )
+
+        lxc = proxmox.nodes(node).lxc(str(vmid))
+        config_updates = {
+            "memory": ram_mib,
+            "cores": max(int(math.ceil(cpus)), 1),
+            "cpulimit": float(cpus),
+            "cpuunits": max(1, int(round(float(cpus) * 100))),
+        }
+        lxc.config.put(**config_updates)
+        try:
+            if disk_gib > before_disk + 1e-9:
+                resize_upid = lxc.resize.put(disk="rootfs", size="%sG" % disk_gib)
+                if resize_upid:
+                    resize_status, _resize_elapsed = _wait_for_task(
+                        proxmox,
+                        node,
+                        resize_upid,
+                        timeout_s=PROXMOX_TASK_WAIT_TIMEOUT_S,
+                    )
+                    _require_successful_proxmox_task(
+                        resize_status, "container root filesystem resize", require_exitstatus=True
+                    )
+        except Exception:
+            # CPU/RAM are reversible, while a successful disk growth is not.
+            # Disk is deliberately last so a disk failure can restore config.
+            lxc.config.put(
+                memory=before_ram,
+                cores=max(int(math.ceil(before_cpu)), 1),
+                cpulimit=float(before_cpu),
+                cpuunits=max(1, int(round(float(before_cpu) * 100))),
+            )
+            raise
+
+        verified = lxc.config.get()
+        after_cpu = _pick_container_cpu_share("lxc", verified, {})
+        after_ram = int(round(_pick_container_ram_mib("lxc", verified, {})))
+        after_disk = _pick_container_disk_gib("lxc", verified, {})
+        if abs(after_cpu - float(cpus)) > 0.001 or after_ram != ram_mib:
+            raise RuntimeError("Proxmox did not retain the requested CPU/RAM allocation")
+        if after_disk + 1e-9 < disk_gib:
+            raise RuntimeError("Proxmox did not retain the requested disk allocation")
+
+        record_updates = {
+            "cpus": float(cpus),
+            "cpulimit": float(cpus),
+            "cpuunits": config_updates["cpuunits"],
+            "cores": config_updates["cores"],
+            "ram_mib": ram_mib,
+            "memory": ram_mib,
+            "disk_gib": disk_gib,
+        }
+        if record:
+            _update_container_record(vmid, record_updates)
+        else:
+            _write_container_record(vmid, dict(record_updates, vmid=vmid, device_id=child_device_id))
+
+        return {
+            "event": "proxmox_container_resized",
+            "success": True,
+            "ctid": str(vmid),
+            "child_device_id": child_device_id,
+            "before": {
+                "cpus": before_cpu,
+                "ram_mib": before_ram,
+                "disk_gib": before_disk,
+            },
+            "after": {
+                "cpus": after_cpu,
+                "ram_mib": after_ram,
+                "disk_gib": after_disk,
+            },
+            "message": "Container resources updated successfully.",
+            "infra": get_infra_snapshot(),
+        }
+
+
 class StopProxmoxContainerHandler(SyncHandler):
     """Stop a managed container via the Proxmox API."""
 

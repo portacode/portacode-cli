@@ -26,6 +26,14 @@ def valid_request():
 
 
 class GuestHostProtocolTests(TestCase):
+    def test_resize_request_is_allowlisted(self):
+        request = valid_request()
+        request["command"] = "resize_proxmox_container"
+        request["authorization"]["operation"] = "resize"
+        request["payload"].update({"cpus": 1.5, "ram_mib": 2048, "disk_gib": 8})
+        envelope = validate_guest_host_request(request)
+        self.assertEqual(envelope["command"], "resize_proxmox_container")
+
     def test_validates_request_without_trusting_role_for_routing(self):
         envelope = validate_guest_host_request(valid_request())
         self.assertEqual(envelope["target_device_id"], "42")

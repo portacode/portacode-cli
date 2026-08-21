@@ -56,6 +56,7 @@ from .project_state_handlers import (
 from .proxmox_infra import (
     ConfigureProxmoxInfraHandler,
     CreateProxmoxContainerHandler,
+    ResizeProxmoxContainerHandler,
     RevertProxmoxInfraHandler,
     StartPortacodeServiceHandler,
     StartProxmoxContainerHandler,
@@ -98,6 +99,7 @@ __all__ = [
     "BrowserRunHandler",
     "ConfigureProxmoxInfraHandler",
     "CreateProxmoxContainerHandler",
+    "ResizeProxmoxContainerHandler",
     # File operation handlers (optional - register as needed)
     "FileReadHandler",
     "ImageReadHandler",
