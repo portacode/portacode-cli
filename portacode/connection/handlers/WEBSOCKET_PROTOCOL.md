@@ -94,6 +94,10 @@ Protocol version 1 defines these request types and command mappings:
 - `power` → `start_proxmox_container`, `stop_proxmox_container`, or `restart_proxmox_container`;
 - `delete` → `remove_proxmox_container`;
 - `provision` → `create_proxmox_container`.
+- `snapshots.read` → `list_proxmox_container_snapshots`.
+- `snapshots.create` → `create_proxmox_container_snapshot`.
+- `snapshots.delete` → `delete_proxmox_container_snapshots` (one or more names).
+- `snapshots.rollback` → `rollback_proxmox_container_snapshot`.
 
 Supporting CLI versions advertise the enabled set in
 `system_info.protocol_capabilities.guest_host_requests.request_types`. The

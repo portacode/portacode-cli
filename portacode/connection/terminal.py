@@ -77,6 +77,10 @@ from .handlers import (
     StopProxmoxContainerHandler,
     RestartProxmoxContainerHandler,
     RemoveProxmoxContainerHandler,
+    ListProxmoxContainerSnapshotsHandler,
+    CreateProxmoxContainerSnapshotHandler,
+    DeleteProxmoxContainerSnapshotsHandler,
+    RollbackProxmoxContainerSnapshotHandler,
     CloudflareTunnelSetupHandler,
     CloudflareForwardingHandler,
     ConfigureProxmoxContainerExposePortsHandler,
@@ -602,6 +606,10 @@ class TerminalManager:
         self._command_registry.register(StopProxmoxContainerHandler)
         self._command_registry.register(RestartProxmoxContainerHandler)
         self._command_registry.register(RemoveProxmoxContainerHandler)
+        self._command_registry.register(ListProxmoxContainerSnapshotsHandler)
+        self._command_registry.register(CreateProxmoxContainerSnapshotHandler)
+        self._command_registry.register(DeleteProxmoxContainerSnapshotsHandler)
+        self._command_registry.register(RollbackProxmoxContainerSnapshotHandler)
         self._command_registry.register(RevertProxmoxInfraHandler)
         self._command_registry.register(CloudflareTunnelSetupHandler)
         self._command_registry.register(CloudflareForwardingHandler)

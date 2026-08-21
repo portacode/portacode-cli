@@ -5404,6 +5404,68 @@ class RestartProxmoxContainerHandler(SyncHandler):
         }
 
 
+class _ContainerSnapshotHandler(SyncHandler):
+    """Common ownership-safe Proxmox LXC snapshot operations."""
+    def _context(self, message):
+        child = str(message.get("child_device_id") or "").strip()
+        if not child:
+            raise ValueError("child_device_id is required")
+        config = _ensure_infra_configured()
+        proxmox = _connect_proxmox(config)
+        node = _get_node_from_config(config)
+        try:
+            vmid = _parse_ctid(message)
+        except ValueError:
+            vmid = _resolve_vmid_for_device(child)
+        _ensure_container_managed(proxmox, node, vmid, device_id=child)
+        return proxmox.nodes(node).lxc(str(vmid)).snapshot, vmid
+
+
+class ListProxmoxContainerSnapshotsHandler(_ContainerSnapshotHandler):
+    @property
+    def command_name(self): return "list_proxmox_container_snapshots"
+    def execute(self, message):
+        snapshots, vmid = self._context(message)
+        rows = snapshots.get() or []
+        return {"event": "proxmox_container_snapshots", "action": "list", "ctid": str(vmid), "snapshots": rows, "count": len(rows)}
+
+
+class CreateProxmoxContainerSnapshotHandler(_ContainerSnapshotHandler):
+    @property
+    def command_name(self): return "create_proxmox_container_snapshot"
+    def execute(self, message):
+        snapshots, vmid = self._context(message)
+        name = str(message.get("snapshot_name") or "").strip()
+        if not name or len(name) > 40 or not name.replace("-", "").replace("_", "").isalnum():
+            raise ValueError("snapshot_name must be 1-40 characters using letters, numbers, '-' or '_'")
+        snapshots.post(snapname=name, description=str(message.get("description") or "")[:512])
+        return {"event": "proxmox_container_snapshot", "action": "create", "ctid": str(vmid), "snapshot_name": name, "success": True}
+
+
+class DeleteProxmoxContainerSnapshotsHandler(_ContainerSnapshotHandler):
+    @property
+    def command_name(self): return "delete_proxmox_container_snapshots"
+    def execute(self, message):
+        snapshots, vmid = self._context(message)
+        names = message.get("snapshot_names") or []
+        if isinstance(names, str): names = [names]
+        names = [str(n).strip() for n in names if str(n).strip()]
+        if not names or len(names) > 50: raise ValueError("snapshot_names must contain 1-50 names")
+        for name in names: snapshots(name).delete()
+        return {"event": "proxmox_container_snapshot", "action": "delete", "ctid": str(vmid), "deleted": names, "count": len(names), "success": True}
+
+
+class RollbackProxmoxContainerSnapshotHandler(_ContainerSnapshotHandler):
+    @property
+    def command_name(self): return "rollback_proxmox_container_snapshot"
+    def execute(self, message):
+        snapshots, vmid = self._context(message)
+        name = str(message.get("snapshot_name") or "").strip()
+        if not name: raise ValueError("snapshot_name is required")
+        snapshots(name).rollback.post()
+        return {"event": "proxmox_container_snapshot", "action": "rollback", "ctid": str(vmid), "snapshot_name": name, "success": True}
+
+
 class RemoveProxmoxContainerHandler(SyncHandler):
     """Delete a managed container via the Proxmox API."""
 

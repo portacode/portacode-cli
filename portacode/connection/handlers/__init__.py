@@ -63,6 +63,10 @@ from .proxmox_infra import (
     StopProxmoxContainerHandler,
     RestartProxmoxContainerHandler,
     RemoveProxmoxContainerHandler,
+    ListProxmoxContainerSnapshotsHandler,
+    CreateProxmoxContainerSnapshotHandler,
+    DeleteProxmoxContainerSnapshotsHandler,
+    RollbackProxmoxContainerSnapshotHandler,
 )
 from .cloudflare_tunnel import CloudflareTunnelSetupHandler
 from .cloudflare_forwarding import (
@@ -138,6 +142,10 @@ __all__ = [
     "StopProxmoxContainerHandler",
     "RestartProxmoxContainerHandler",
     "RemoveProxmoxContainerHandler",
+    "ListProxmoxContainerSnapshotsHandler",
+    "CreateProxmoxContainerSnapshotHandler",
+    "DeleteProxmoxContainerSnapshotsHandler",
+    "RollbackProxmoxContainerSnapshotHandler",
     "UpdatePortacodeHandler",
     "RevertProxmoxInfraHandler",
     "CloudflareTunnelSetupHandler",

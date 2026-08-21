@@ -28,6 +28,10 @@ GUEST_HOST_REQUEST_COMMANDS = frozenset(
         "remove_proxmox_container",
         "create_proxmox_container",
         "resize_proxmox_container",
+        "list_proxmox_container_snapshots",
+        "create_proxmox_container_snapshot",
+        "delete_proxmox_container_snapshots",
+        "rollback_proxmox_container_snapshot",
     }
 )
 GUEST_HOST_COMMAND_OPERATIONS = {
@@ -38,6 +42,10 @@ GUEST_HOST_COMMAND_OPERATIONS = {
     "remove_proxmox_container": "delete",
     "create_proxmox_container": "provision",
     "resize_proxmox_container": "resize",
+    "list_proxmox_container_snapshots": "snapshots.read",
+    "create_proxmox_container_snapshot": "snapshots.create",
+    "delete_proxmox_container_snapshots": "snapshots.delete",
+    "rollback_proxmox_container_snapshot": "snapshots.rollback",
 }
 
 # Every advertised operation is mapped to its existing, independently
@@ -52,6 +60,10 @@ GUEST_HOST_EXECUTABLE_COMMANDS = frozenset(
         "remove_proxmox_container",
         "create_proxmox_container",
         "resize_proxmox_container",
+        "list_proxmox_container_snapshots",
+        "create_proxmox_container_snapshot",
+        "delete_proxmox_container_snapshots",
+        "rollback_proxmox_container_snapshot",
     }
 )
 
