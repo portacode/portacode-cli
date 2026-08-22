@@ -676,8 +676,6 @@ def install_codex_dependencies(on_progress: Optional[Callable[[str], None]] = No
         if on_progress:
             on_progress(message)
 
-    progress("Checking administrator access…")
-    _authorize_sudo_if_needed()
     progress("Installing Node.js if needed…")
     _install_node_if_needed()
     progress("Installing Codex CLI…")

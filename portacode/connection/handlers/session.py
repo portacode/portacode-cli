@@ -65,7 +65,6 @@ def _configure_pty_window_size(fd: int, rows: int, cols: int) -> None:
 _DEFAULT_ENV = {
     "TERM": "xterm-256color",
     "LANG": "C.UTF-8",
-    "SHELL": "/bin/bash",
 }
 
 
@@ -111,7 +110,14 @@ def _resolve_session_shell(requested_shell: Optional[str], session_user: str) ->
     user's zsh login setup (including PATH entries for user-installed tools).
     Consult the account database first so IDE terminals match Terminal.app.
     """
-    if requested_shell:
+    # Older dashboard clients sent the bare value ``bash`` even when the user
+    # had not selected a shell.  On macOS that accidentally opts users into
+    # Apple's deprecated system Bash and produces the chsh warning on every
+    # terminal.  Treat that legacy value as "system default"; an explicit
+    # path such as /bin/bash is still honoured.
+    if requested_shell and not (
+        sys.platform == "darwin" and requested_shell in {"bash", "/bin/bash"}
+    ):
         return requested_shell
     if _IS_WINDOWS:
         return os.getenv("COMSPEC", "cmd.exe")
@@ -132,6 +138,31 @@ def _resolve_session_shell(requested_shell: Optional[str], session_user: str) ->
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
     return "/bin/sh"
+
+
+def _add_session_user_paths(env: Dict[str, str], session_user: str) -> None:
+    """Ensure user-installed and Portacode commands are available in terminals."""
+    candidates: List[str] = []
+    try:
+        import pwd
+
+        user_home = (pwd.getpwnam(session_user).pw_dir or "").strip()
+    except (ImportError, KeyError, OSError):
+        user_home = ""
+    if user_home:
+        candidates.append(os.path.join(user_home, ".local", "bin"))
+
+    # sys.executable is the interpreter running the installed Portacode agent;
+    # for a venv install its sibling directory contains the portacode script.
+    executable_dir = os.path.dirname(os.path.abspath(sys.executable))
+    if executable_dir:
+        candidates.append(executable_dir)
+
+    current = [entry for entry in env.get("PATH", "").split(os.pathsep) if entry]
+    for candidate in reversed(candidates):
+        if candidate not in current:
+            current.insert(0, candidate)
+    env["PATH"] = os.pathsep.join(current)
 
 
 def _preexec_setup_controlling_tty(slave_fd: int) -> None:
@@ -869,6 +900,7 @@ class SessionManager:
 
         env = _build_child_env()
         env["SHELL"] = shell
+        _add_session_user_paths(env, session_user)
 
         env["PORTACODE_LINK_CHANNEL"] = str(_LINK_EVENT_ROOT)
         env["PORTACODE_TERMINAL_ID"] = term_id

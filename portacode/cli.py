@@ -60,15 +60,20 @@ def prepare_codex_command(install_only: bool = False) -> None:
     except CodexPreparationError as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(click.style(f"Codex is ready: {config_path}", fg="green"))
-    click.echo(
-        click.style(
-            "For this terminal only, run: export OPENAI_API_KEY=portacode-local\n"
+    if sys.platform == "darwin":
+        detail = (
+            "Codex access was saved to ~/.zshenv and the launchd environment. "
+            "Restart Portacode if it was already running."
+        )
+    elif sys.platform.startswith("linux"):
+        detail = (
             "New IDE terminals load /etc/portacode/codex.env automatically.\n"
             "The Portacode systemd service loads that file via EnvironmentFile "
-            "(restart the service once if this device was prepared before that support).",
-            fg="yellow",
+            "(restart the service once if it was already running)."
         )
-    )
+    else:
+        detail = "Codex access was saved for new terminal sessions."
+    click.echo(click.style(detail, fg="yellow"))
 
 
 @cli.command("github-setup")

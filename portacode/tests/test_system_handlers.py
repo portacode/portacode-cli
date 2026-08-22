@@ -6,6 +6,10 @@ def test_system_info_includes_codex_installation_capability(monkeypatch):
         "portacode.connection.handlers.system_handlers.CodexAppServer.get_binary_path",
         lambda: "/runtime/.local/bin/codex",
     )
+    monkeypatch.setattr(
+        "portacode.connection.handlers.system_handlers._codex_prepared",
+        lambda: True,
+    )
 
     payload = SystemInfoHandler(None, {}).execute({})
 
@@ -13,4 +17,5 @@ def test_system_info_includes_codex_installation_capability(monkeypatch):
     assert payload["info"]["codex"] == {
         "installed": True,
         "app_server_supported": True,
+        "ready": True,
     }

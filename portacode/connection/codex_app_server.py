@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -480,6 +481,16 @@ class CodexAppServer:
             home / ".local" / "bin" / command,
             home / ".npm" / "bin" / command,
         ]
+        # launchd gives LaunchAgents a deliberately small default PATH that
+        # excludes Homebrew.  A prepared Codex cask therefore exists and runs
+        # from Terminal.app while system_info incorrectly reports it missing.
+        # Check the stable Homebrew entry points explicitly; this also covers
+        # Intel Macs where the prefix is /usr/local.
+        if sys.platform == "darwin":
+            candidates.extend([
+                Path("/opt/homebrew/bin") / command,
+                Path("/usr/local/bin") / command,
+            ])
         nvm_root = home / ".nvm" / "versions" / "node"
         if nvm_root.is_dir():
             candidates.extend(sorted(nvm_root.glob("*/bin/" + command), reverse=True))

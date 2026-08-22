@@ -19,7 +19,10 @@ from portacode.codex_prepare import (
 
 def test_install_codex_dependencies_is_cache_safe(monkeypatch):
     calls = []
-    monkeypatch.setattr("portacode.codex_prepare._authorize_sudo_if_needed", lambda: calls.append("sudo"))
+    monkeypatch.setattr(
+        "portacode.codex_prepare._authorize_sudo_if_needed",
+        lambda: (_ for _ in ()).throw(AssertionError("cached setup must not request sudo")),
+    )
     monkeypatch.setattr("portacode.codex_prepare._install_node_if_needed", lambda: calls.append("node"))
     monkeypatch.setattr("portacode.codex_prepare._install_codex", lambda: calls.append("codex"))
     monkeypatch.setattr(
@@ -29,7 +32,7 @@ def test_install_codex_dependencies_is_cache_safe(monkeypatch):
 
     install_codex_dependencies()
 
-    assert calls == ["sudo", "node", "codex"]
+    assert calls == ["node", "codex"]
 
 
 def test_node_without_npm_is_not_treated_as_ready(monkeypatch):

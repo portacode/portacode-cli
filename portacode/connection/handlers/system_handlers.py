@@ -28,6 +28,7 @@ from .proxmox_infra import get_infra_snapshot
 from .runtime_user import get_default_runtime_user, get_runtime_user_home
 from portacode.tunneling.forwarding_state import load_forwarding_state
 from portacode.connection.codex_app_server import CodexAppServer
+from portacode.codex_prepare import LOCAL_SENTINEL, resolve_codex_home
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,20 @@ _last_cgroup_time: Optional[float] = None
 FALLBACK_UNIX = "/bin/sh"
 FALLBACK_WINDOWS = "cmd.exe"
 BASH_PATHS = ["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash"]
+
+
+def _codex_prepared() -> bool:
+    """Return whether the local Codex proxy configuration is usable."""
+    try:
+        config = resolve_codex_home() / "config.toml"
+        text = config.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return (
+        os.environ.get("OPENAI_API_KEY") == LOCAL_SENTINEL
+        and 'model_provider = "portacode_proxy"' in text
+        and "http://127.0.0.1:61789/v1" in text
+    )
 
 def _cpu_monitor():
     """Background thread to update CPU usage every 5 seconds."""
@@ -622,9 +637,11 @@ class SystemInfoHandler(SyncHandler):
         # receives system_info on connect and periodically, so it should not
         # need a separate request merely to decide whether to show Codex UI.
         codex_installed = bool(CodexAppServer.get_binary_path())
+        codex_ready = codex_installed and _codex_prepared()
         info["codex"] = {
             "installed": codex_installed,
             "app_server_supported": codex_installed,
+            "ready": codex_ready,
         }
         # logger.info("System info collected successfully with OS info: %s", info.get("os_info", {}).get("os_type", "Unknown"))
         

@@ -239,6 +239,24 @@ async def test_spawn_finds_nvm_codex_when_service_path_does_not(tmp_path, monkey
     await bridge.stop()
 
 
+def test_finds_homebrew_codex_with_launchd_path(monkeypatch):
+    """macOS LaunchAgents do not inherit /opt/homebrew/bin in PATH."""
+    monkeypatch.setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+    monkeypatch.setattr("portacode.connection.codex_app_server.sys.platform", "darwin")
+    original_is_file = Path.is_file
+
+    def fake_is_file(path):
+        return str(path) == "/opt/homebrew/bin/codex" or original_is_file(path)
+
+    monkeypatch.setattr(Path, "is_file", fake_is_file)
+    monkeypatch.setattr(
+        "portacode.connection.codex_app_server.os.access",
+        lambda path, mode: path == "/opt/homebrew/bin/codex",
+    )
+
+    assert CodexAppServer._resolve_command_path("codex", "/Users/meena") == "/opt/homebrew/bin/codex"
+
+
 def test_build_codex_subprocess_env_reads_managed_file(tmp_path):
     from portacode.codex_prepare import build_codex_subprocess_env
 
