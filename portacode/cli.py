@@ -772,12 +772,12 @@ def service_uninstall() -> None:  # noqa: D401
         mgr.uninstall()
         click.echo(click.style("✔ Service removed", fg="green"))
     except Exception as exc:
-        click.echo(click.style(f"Failed: {exc}", fg="red"))
+        raise click.ClickException(f"Service removal failed: {exc}") from exc
 
 
 @service.command("start")
 def service_start() -> None:  # noqa: D401
-    """Start the service if installed (Linux: system service only)."""
+    """Start the installed background service."""
     from .service import get_manager
 
     mgr = get_manager(system_mode=True)
@@ -787,39 +787,44 @@ def service_start() -> None:  # noqa: D401
         if st in {"active", "running"}:
             click.echo(click.style("Service started and running", fg="green"))
         else:
-            click.echo(click.style(f"Service start issued but current status: {st}", fg="yellow"))
-            if hasattr(mgr, "log_path"):
-                click.echo(f"Inspect log: {mgr.log_path}")
+            detail = f"; inspect log: {mgr.log_path}" if hasattr(mgr, "log_path") else ""
+            raise RuntimeError(f"service status is {st}{detail}")
     except Exception as exc:
-        click.echo(click.style(f"Failed: {exc}", fg="red"))
+        raise click.ClickException(f"Service start failed: {exc}") from exc
 
 
 @service.command("restart")
 def service_restart() -> None:  # noqa: D401
-    """Restart the service (Linux: system service only)."""
+    """Restart the installed background service."""
     try:
         _restart_service_and_report()
+    except click.ClickException:
+        raise
     except Exception as exc:
-        click.echo(click.style(f"Failed: {exc}", fg="red"))
+        raise click.ClickException(f"Restart failed: {exc}") from exc
 
 
 @service.command("stop")
 def service_stop() -> None:  # noqa: D401
-    """Stop the service if running (Linux: system service only)."""
+    """Stop the background service if running."""
     from .service import get_manager
 
     mgr = get_manager(system_mode=True)
     try:
         mgr.stop()
-        click.echo(click.style("Service stopped", fg="green"))
+        st = mgr.status()
+        if st in {"stopped", "inactive"}:
+            click.echo(click.style("Service stopped", fg="green"))
+        else:
+            raise RuntimeError(f"service is still {st}")
     except Exception as exc:
-        click.echo(click.style(f"Failed: {exc}", fg="red"))
+        raise click.ClickException(f"Service stop failed: {exc}") from exc
 
 
 @service.command("status")
 @click.option("--verbose", "verbose", "-v", is_flag=True, help="Show detailed service status info")
 def service_status(verbose: bool) -> None:  # noqa: D401
-    """Show current status (running/loaded). Pass -v for system output (Linux: system service only)."""
+    """Show current status (running/loaded). Pass -v for manager output."""
     from .service import get_manager
 
     mgr = get_manager(system_mode=True)
@@ -831,7 +836,7 @@ def service_status(verbose: bool) -> None:  # noqa: D401
             click.echo("\n--- system output ---")
             click.echo(mgr.status_verbose())
     except Exception as exc:
-        click.echo(click.style(f"Failed: {exc}", fg="red")) 
+        raise click.ClickException(f"Could not read service status: {exc}") from exc
 
 
 def _restart_service_manager() -> None:
@@ -854,6 +859,8 @@ def _restart_service_and_report(message: str = "Restarting Portacode service…"
         st = get_manager(system_mode=True).status()
     except Exception:
         st = "unknown"
+    if st not in {"active", "running"}:
+        raise click.ClickException(f"Restart failed: service status is {st}")
     click.echo(click.style(f"✔ Service restarted (status: {st})", fg="green"))
 
 

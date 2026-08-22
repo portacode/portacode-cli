@@ -457,6 +457,14 @@ class _LaunchdService:
             raise RuntimeError(msg)
         return res
 
+    @property
+    def _domain(self) -> str:
+        return f"gui/{os.getuid()}"
+
+    @property
+    def _service_target(self) -> str:
+        return f"{self._domain}/{self.LABEL}"
+
     def install(self) -> None:
         self.plist_path.parent.mkdir(parents=True, exist_ok=True)
         self.script_path.parent.mkdir(parents=True, exist_ok=True)
@@ -502,31 +510,47 @@ class _LaunchdService:
             """
         ).lstrip()
         self.plist_path.write_text(plist)
-        self._run_checked("load", "-w", str(self.plist_path))
+        # Use launchd's domain-aware API.  The older ``load`` command can
+        # return success while leaving a previously loaded job definition in
+        # place, which makes upgrades and subsequent stop/start commands look
+        # successful without changing the running process.
+        if self.status() == "running":
+            self._run_checked("bootout", self._service_target)
+        self._run_checked("bootstrap", self._domain, str(self.plist_path))
 
     def uninstall(self) -> None:
-        self._run("unload", "-w", str(self.plist_path))
+        if self.status() == "running":
+            self._run_checked("bootout", self._service_target)
         if self.plist_path.exists():
             self.plist_path.unlink()
         if self.script_path.exists():
             self.script_path.unlink()
 
     def start(self) -> None:
-        self._run("start", self.LABEL)
+        if not self.plist_path.is_file():
+            raise RuntimeError(f"Portacode login agent is not installed: {self.plist_path}")
+        if self.status() != "running":
+            self._run_checked("bootstrap", self._domain, str(self.plist_path))
+        else:
+            self._run_checked("kickstart", "-k", self._service_target)
 
     def stop(self) -> None:
-        self._run("stop", self.LABEL)
+        # ``launchctl stop`` only sends the process a signal.  A KeepAlive job
+        # is immediately relaunched, so stopping it requires removing it from
+        # the launchd domain while retaining the plist for a later start.
+        if self.status() == "running":
+            self._run_checked("bootout", self._service_target)
 
     def restart(self) -> None:
         self.stop()
         self.start()
 
     def status(self) -> str:
-        res = self._run("list", self.LABEL)
+        res = self._run("print", self._service_target)
         return "running" if res.returncode == 0 else "stopped"
 
     def status_verbose(self) -> str:
-        res = self._run("list", self.LABEL)
+        res = self._run("print", self._service_target)
         return res.stdout or res.stderr
 
 

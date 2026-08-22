@@ -21,6 +21,30 @@ class ServiceCommandTests(TestCase):
             with self.assertRaisesRegex(RuntimeError, "load failed"):
                 service.install()
 
+    @patch("portacode.service.os.getuid", return_value=501)
+    def test_launchd_stop_boots_keepalive_job_out_of_user_domain(self, _mock_getuid):
+        service = _LaunchdService()
+        service._run = Mock(
+            side_effect=[
+                Mock(returncode=0, stderr="", stdout="loaded"),
+                Mock(returncode=0, stderr="", stdout=""),
+            ]
+        )
+
+        service.stop()
+
+        self.assertEqual(service._run.call_args_list[0].args, ("print", "gui/501/com.portacode.connect"))
+        self.assertEqual(service._run.call_args_list[1].args, ("bootout", "gui/501/com.portacode.connect"))
+
+    @patch("portacode.service.os.getuid", return_value=501)
+    def test_launchd_stop_is_idempotent_when_job_is_not_loaded(self, _mock_getuid):
+        service = _LaunchdService()
+        service._run = Mock(return_value=Mock(returncode=113, stderr="not found", stdout=""))
+
+        service.stop()
+
+        service._run.assert_called_once_with("print", "gui/501/com.portacode.connect")
+
     @patch.dict(
         os.environ,
         {
