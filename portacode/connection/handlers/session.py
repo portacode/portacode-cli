@@ -103,6 +103,37 @@ def _shell_argv_for_session(shell: str) -> List[str]:
     return argv
 
 
+def _resolve_session_shell(requested_shell: Optional[str], session_user: str) -> str:
+    """Resolve the interactive shell independently of the service environment.
+
+    macOS launchd agents commonly have no ``SHELL`` variable.  Falling back to
+    Bash there both displays Apple's deprecated-shell notice and skips the
+    user's zsh login setup (including PATH entries for user-installed tools).
+    Consult the account database first so IDE terminals match Terminal.app.
+    """
+    if requested_shell:
+        return requested_shell
+    if _IS_WINDOWS:
+        return os.getenv("COMSPEC", "cmd.exe")
+
+    try:
+        import pwd
+
+        account_shell = (pwd.getpwnam(session_user).pw_shell or "").strip()
+        if account_shell and os.path.isfile(account_shell) and os.access(account_shell, os.X_OK):
+            return account_shell
+    except (ImportError, KeyError, OSError):
+        pass
+
+    environment_shell = (os.getenv("SHELL") or "").strip()
+    if environment_shell:
+        return environment_shell
+    for candidate in ("/bin/bash", "/bin/sh"):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return "/bin/sh"
+
+
 def _preexec_setup_controlling_tty(slave_fd: int) -> None:
     """
     Put the child into a new session and attach the PTY slave as the controlling tty.
@@ -831,24 +862,13 @@ class SessionManager:
         channel_id = session_uuid
         channel = self.mux.get_channel(channel_id)
 
-        # Choose shell - prefer bash over sh for better terminal compatibility
-        if shell is None:
-            if not _IS_WINDOWS:
-                shell = os.getenv("SHELL")
-                # If the default shell is /bin/sh, try to use bash instead for better terminal support
-                if shell == "/bin/sh":
-                    for bash_path in ["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash"]:
-                        if os.path.exists(bash_path):
-                            shell = bash_path
-                            logger.info("Switching from /bin/sh to %s for better terminal compatibility", shell)
-                            break
-            else:
-                shell = os.getenv("COMSPEC", "cmd.exe")
+        session_user = (run_as_user or get_default_runtime_user()).strip()
+        shell = _resolve_session_shell(shell, session_user)
 
         logger.info("Launching terminal %s using shell=%s on channel=%s", term_id, shell, channel_id)
 
         env = _build_child_env()
-        session_user = (run_as_user or get_default_runtime_user()).strip()
+        env["SHELL"] = shell
 
         env["PORTACODE_LINK_CHANNEL"] = str(_LINK_EVENT_ROOT)
         env["PORTACODE_TERMINAL_ID"] = term_id
