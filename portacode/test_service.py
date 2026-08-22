@@ -6,10 +6,21 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import Mock, patch
 
-from portacode.service import _OpenRCService, _SystemdUserService, _build_connect_command
+from portacode.service import _LaunchdService, _OpenRCService, _SystemdUserService, _build_connect_command
 
 
 class ServiceCommandTests(TestCase):
+    def test_launchd_install_reports_launchctl_failure(self):
+        with TemporaryDirectory() as tmpdir:
+            service = _LaunchdService()
+            service.plist_path = Path(tmpdir) / "Library" / "LaunchAgents" / "com.portacode.connect.plist"
+            service.script_path = Path(tmpdir) / "portacode" / "connect_service.sh"
+            service.log_path = Path(tmpdir) / "portacode" / "connect.log"
+            service._run = Mock(return_value=Mock(returncode=1, stderr="load failed", stdout=""))
+
+            with self.assertRaisesRegex(RuntimeError, "load failed"):
+                service.install()
+
     @patch.dict(
         os.environ,
         {

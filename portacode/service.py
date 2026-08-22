@@ -450,6 +450,13 @@ class _LaunchdService:
         cmd = ["launchctl", *args]
         return subprocess.run(cmd, text=True, capture_output=True)
 
+    def _run_checked(self, *args: str) -> subprocess.CompletedProcess[str]:
+        res = self._run(*args)
+        if res.returncode != 0:
+            msg = (res.stderr or res.stdout or "").strip() or f"launchctl {' '.join(args)} failed"
+            raise RuntimeError(msg)
+        return res
+
     def install(self) -> None:
         self.plist_path.parent.mkdir(parents=True, exist_ok=True)
         self.script_path.parent.mkdir(parents=True, exist_ok=True)
@@ -495,7 +502,7 @@ class _LaunchdService:
             """
         ).lstrip()
         self.plist_path.write_text(plist)
-        self._run("load", "-w", str(self.plist_path))
+        self._run_checked("load", "-w", str(self.plist_path))
 
     def uninstall(self) -> None:
         self._run("unload", "-w", str(self.plist_path))

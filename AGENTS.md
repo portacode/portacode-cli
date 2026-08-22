@@ -18,6 +18,32 @@ instructions for their subtrees.
   reviewing status, diffs, tests, commits, and releases. Never assume committing
   the parent repository also commits unpublished server changes.
 
+## Conditional deployment and verification
+
+- Choose deployment actions based on the files changed and the user’s request;
+  do not run release or reload commands by habit.
+- Use this deployment matrix and combine only the rows that match the change:
+  - Installed public `portacode` Python package: run relevant package tests.
+    Publish a PyPI version and activate it only when the user explicitly
+    authorizes the release and asks to deploy that package change.
+  - Server-side Python: run applicable Django checks/tests. Run
+    `./debug/trigger_web_reload.sh` only when immediate activation is requested
+    or required for long-running Django processes to import the changed code.
+  - Django templates: validate the templates. They normally need neither
+    `collectstatic` nor a process reload; reload only when the active deployment
+    demonstrably caches them or the user explicitly requests it.
+  - Files under Django `static/`: run `collectstatic --noinput` when immediate
+    deployment is requested. Static-only changes normally need no Gunicorn or
+    worker reload.
+  - Files under `content/`: validate them, but do not run `collectstatic` or a
+    web reload. Run the content synchronization command only when the user asks
+    to create/update the CMS records or publish the content.
+- Do not publish PyPI for server-only, template-only, static-only, content-only,
+  documentation-only, or test-only changes.
+- When changing a static asset URL or cache-busting version, verify the exact
+  public URL after `collectstatic`; a source-tree change is not proof that the
+  deployed asset changed.
+
 ## Device-side CLI deployment and live debugging
 
 - Treat the repository checkout and the installed `portacode` CLI as separate
@@ -27,7 +53,8 @@ instructions for their subtrees.
   manipulate the Portacode system service merely to activate source edits.
   Doing so interrupts the device connection and active Codex app-server
   sessions without deploying the edited code.
-- The normal device-side deployment workflow is:
+- When an installed PyPI package change is explicitly authorized for device-side
+  deployment, the workflow is:
   1. After tests pass and the user has authorized publishing, publish an explicit
      development version with `make release VERSION=<version>`.
   2. Install and activate that package with `portacode setversion <version>`.

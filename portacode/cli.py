@@ -735,12 +735,14 @@ def service() -> None:  # noqa: D401 – Click callback
 
 @service.command("install")
 def service_install() -> None:  # noqa: D401
-    """Install + enable the background service and start it now (Linux: system service only)."""
+    """Install + enable the background service and start it now."""
     from .service import get_manager
 
     mgr = get_manager(system_mode=True)
-    click.echo(f"Installing Portacode system service…")
-    if os.geteuid() != 0:
+    is_macos = sys.platform == "darwin"
+    service_kind = "login agent" if is_macos else "system service"
+    click.echo(f"Installing Portacode {service_kind}…")
+    if not is_macos and os.geteuid() != 0:
         click.echo(click.style("[sudo] You may be prompted for your password to install the system service.", fg="yellow"))
         click.echo(click.style("💡 For persistent connection, install system-wide: sudo pip install portacode --system", fg="bright_black"))
     try:
@@ -753,18 +755,19 @@ def service_install() -> None:  # noqa: D401
             if hasattr(mgr, "log_path"):
                 click.echo(f"Inspect log: {mgr.log_path}")
     except Exception as exc:
-        click.echo(click.style(f"Failed: {exc}", fg="red"))
         if "No module named" in str(exc) or "command not found" in str(exc):
             click.echo(click.style("💡 Try installing system-wide: sudo pip install portacode --system", fg="bright_cyan"))
+        raise click.ClickException(f"Service installation failed: {exc}") from exc
 
 
 @service.command("uninstall")
 def service_uninstall() -> None:  # noqa: D401
-    """Stop + remove the background service (Linux: system service only)."""
+    """Stop + remove the background service."""
     from .service import get_manager
 
     mgr = get_manager(system_mode=True)
-    click.echo(f"Uninstalling Portacode system service…")
+    service_kind = "login agent" if sys.platform == "darwin" else "system service"
+    click.echo(f"Uninstalling Portacode {service_kind}…")
     try:
         mgr.uninstall()
         click.echo(click.style("✔ Service removed", fg="green"))
